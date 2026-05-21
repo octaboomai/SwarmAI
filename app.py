@@ -1,71 +1,49 @@
 import streamlit as st
 import requests
-import os
 
-# ─── SWARM LOGIC ─────────────────────────────────────────────────
-HF_TOKEN = os.environ.get("HF_TOKEN")
+# Set up the webpage
+st.set_page_config(page_title="Hive Queen AI", layout="centered")
+st.title("🐝 Sovereign Swarm Engine")
+st.markdown("Powered by Local Open-Source Models & Dynamic Routing.")
 
-MODELS = {
-    "coder":   "codellama/CodeLlama-7b-Instruct-hf",
-    "math":    "Qwen/Qwen2-Math-7B-Instruct",
-    "general": "meta-llama/Meta-Llama-3-8B-Instruct"
-}
-
-def call_hf(model_key: str, prompt: str) -> str:
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    url = f"https://api-inference.huggingface.co/models/{MODELS[model_key]}"
-    try:
-        response = requests.post(url, headers=headers, json={
-            "inputs": prompt,
-            "parameters": {"max_new_tokens": 500}
-        }, timeout=30)
-        result = response.json()
-        if isinstance(result, list):
-            return result[0].get("generated_text", "No response")
-        elif isinstance(result, dict) and "error" in result:
-            return f"⚠️ Model error: {result['error']}"
-        return str(result)
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
-
-def router(prompt: str):
-    p = prompt.lower()
-    if any(w in p for w in ["math", "calculate", "equation", "solve"]):
-        return ["math", "coder"]
-    elif any(w in p for w in ["code", "script", "python", "function"]):
-        return ["coder", "general"]
-    else:
-        return ["general"]
-
-# ─── UI ──────────────────────────────────────────────────────────
-st.set_page_config(page_title="Hive Queen AI", page_icon="centered")
-st.title("🐝 Sovereign Swarm Engine — Multi-Agent System")
-st.caption("Powered by Hugging Face Inference API")
-
-if not HF_TOKEN:
-    st.error("⚠️ HF_TOKEN is missing! Add it in Streamlit Cloud secrets.")
-    st.stop()
-
+# Initialize chat history in the browser
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Display previous messages
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if prompt := st.chat_input("Ask your Swarm anything..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
+# The Chat Input Box
+user_prompt = st.chat_input("Ask the Swarm a complex task...")
+
+if user_prompt:
+    # 1. Show the user's message on screen
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.markdown(user_prompt)
+    st.session_state.messages.append({"role": "user", "content": user_prompt})
 
+    # 2. Contact the API (The Nervous System)
     with st.chat_message("assistant"):
-        with st.spinner("🐝 Swarm is thinking..."):
-            plan = router(prompt)
-            result = prompt
-            for model_key in plan:
-                result = call_hf(model_key, result)
-            plan_text = " → ".join(plan)
-            full = f"**Route:** `{plan_text}`\n\n{result}"
-            st.markdown(full)
-
-    st.session_state.messages.append({"role": "assistant", "content": full})
+        status_text = st.empty()
+        status_text.text("The Hive Queen is analyzing the prompt...")
+        
+        try:
+            # Send the prompt to our FastAPI server
+            response = requests.post("http://127.0.0.1:8000/orchestrate", json={"prompt": user_prompt})
+            data = response.json()
+            
+            # Show the Execution Plan to the user (Transparency!)
+            plan_str = " -> ".join(data["plan"])
+            st.info(f"**Execution Plan:** {plan_str}")
+            
+            # Show the Final Answer
+            final_answer = data["final_answer"]
+            st.markdown(final_answer)
+            
+            # Save to history
+            st.session_state.messages.append({"role": "assistant", "content": final_answer})
+            
+        except requests.exceptions.ConnectionError:
+            st.error("🚨 Could not connect to the Swarm API. Is the FastAPI server running?")
