@@ -38,8 +38,8 @@ def router(prompt: str):
         return ["general"]
 
 # ─── UI ──────────────────────────────────────────────────────────
-st.set_page_config(page_title="SwarmAI", page_icon="🐝")
-st.title("🐝 SwarmAI — Multi-Agent System")
+st.set_page_config(page_title="Hive Queen AI", page_icon="centered")
+st.title("🐝 Sovereign Swarm Engine — Multi-Agent System")
 st.caption("Powered by Hugging Face Inference API")
 
 if not HF_TOKEN:
