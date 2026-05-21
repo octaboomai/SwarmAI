@@ -1,6 +1,2 @@
-fastapi
-uvicorn
-requests
-pydantic
 streamlit
 requests
