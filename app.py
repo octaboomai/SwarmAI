@@ -31,7 +31,7 @@ if user_prompt:
         
         try:
             # Send the prompt to our FastAPI server
-            response = requests.post("http://127.0.0.1:8000/orchestrate", json={"prompt": user_prompt})
+            response = requests.post("http://192.168.0.101:8501/orchestrate", json={"prompt": user_prompt})
             data = response.json()
             
             # Show the Execution Plan to the user (Transparency!)
