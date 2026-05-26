@@ -1,0 +1,31 @@
+# SwarmAI .gitignore
+
+# Never push your API keys!
+.env
+*.env
+secrets.toml
+.streamlit/secrets.toml
+
+# Swarm memory database (local only)
+swarm_memory_db/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-project
