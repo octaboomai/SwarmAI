@@ -1,7 +1,17 @@
+"""
+╔══════════════════════════════════════════════════════════════════╗
+║          SOVEREIGN SWARM ENGINE v6.2 - GROQ EDITION        ║
+║   All agents communicate, debate, and build on each other's work ║
+║   8B parameters × 5 agents = Team-level intelligence             ║
+║   v6.3: Fixed decommissioned models — qwen/qwen3-32b + llama-3.3-70b-versatile   ║
+╚══════════════════════════════════════════════════════════════════╝
+"""
+
 import numpy as np
 import requests
 import re
-import chromadb
+import json
+import pathlib
 import json
 import time
 import os
@@ -17,6 +27,25 @@ print("[*] Waking the Hive Queen (Collaborative Swarm v6.2 — Groq Edition)..."
 # ── Groq client — replaces local Ollama ──────────────────────────
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY)
+
+# ── Simple JSON Memory (no external dependencies) ──────────────────
+MEMORY_FILE = pathlib.Path("swarm_memory.json")
+
+def _load_memory() -> list:
+    """Load memory from JSON file."""
+    try:
+        if MEMORY_FILE.exists():
+            return json.loads(MEMORY_FILE.read_text())
+    except Exception:
+        pass
+    return []
+
+def _save_memory(memories: list):
+    """Save memory to JSON file."""
+    try:
+        MEMORY_FILE.write_text(json.dumps(memories, indent=2))
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────────────────────────
 # 1. AGENT DEFINITIONS
@@ -99,38 +128,49 @@ agent_descriptions = [AGENTS[name]["description"] for name in agent_names]
 agent_embeddings = router_brain.encode(agent_descriptions)
 
 # ─────────────────────────────────────────────────────────────────
-# 2. MEMORY CORE (ChromaDB Vector Database)
+# 2. MEMORY CORE (Simple JSON — works everywhere, no dependencies)
 # ─────────────────────────────────────────────────────────────────
 
-chroma_client = chromadb.PersistentClient(path="./swarm_memory_db")
-memory_collection = chroma_client.get_or_create_collection(name="long_term_memory")
-
 def recall_past_memory(query_text: str, n: int = 3) -> Optional[str]:
-    """Search vector DB for past relevant knowledge."""
+    """Search JSON memory for past relevant knowledge using keyword matching."""
     try:
-        results = memory_collection.query(query_texts=[query_text], n_results=n)
-        memories = results['documents'][0]
-        if memories:
-            print(f"[MEMORY] Recalled {len(memories)} related past experiences.")
-            return "\n".join([f"[Past Memory {i+1}]: {m}" for i, m in enumerate(memories)])
+        memories = _load_memory()
+        if not memories:
+            return None
+        # Simple keyword match — find memories related to the query
+        query_words = set(query_text.lower().split())
+        scored = []
+        for mem in memories:
+            mem_words = set(mem.lower().split())
+            score = len(query_words & mem_words)
+            if score > 0:
+                scored.append((score, mem))
+        scored.sort(reverse=True)
+        top = [m for _, m in scored[:n]]
+        if top:
+            print(f"[MEMORY] Recalled {len(top)} related past experiences.")
+            return "\n".join([f"[Past Memory {i+1}]: {m}" for i, m in enumerate(top)])
         return None
     except Exception:
         return None
 
 def consolidate_memory(prompt: str, final_answer: str, agent_contributions: dict):
-    """Save the completed task and all agent contributions to long-term memory."""
+    """Save the completed task to simple JSON long-term memory."""
     try:
-        mem_id = f"mem_{int(time.time())}"
+        memories = _load_memory()
         contributions_summary = " | ".join(
             [f"{agent}: {contrib[:100]}..." for agent, contrib in agent_contributions.items()]
         )
         memory_text = (
             f"Task: {prompt} | "
-            f"Final Answer: {final_answer[:300]}... | "
-            f"Agent Contributions: {contributions_summary}"
+            f"Answer: {final_answer[:300]} | "
+            f"Agents: {contributions_summary}"
         )
-        memory_collection.add(documents=[memory_text], ids=[mem_id])
-        print(f"[MEMORY] Saved as {mem_id}")
+        memories.append(memory_text)
+        # Keep only last 50 memories to avoid file bloat
+        memories = memories[-50:]
+        _save_memory(memories)
+        print(f"[MEMORY] Saved. Total memories: {len(memories)}")
     except Exception as e:
         print(f"[MEMORY] Save failed: {e}")
 
