@@ -10,11 +10,12 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from duckduckgo_search import DDGS
 from datetime import datetime
+from typing import Optional, Tuple, List
 
 print("[*] Waking the Hive Queen (Collaborative Swarm v6.2 — Groq Edition)...")
 
 # ── Groq client — replaces local Ollama ──────────────────────────
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", 
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ─────────────────────────────────────────────────────────────────
@@ -104,7 +105,7 @@ agent_embeddings = router_brain.encode(agent_descriptions)
 chroma_client = chromadb.PersistentClient(path="./swarm_memory_db")
 memory_collection = chroma_client.get_or_create_collection(name="long_term_memory")
 
-def recall_past_memory(query_text: str, n: int = 3) -> str | None:
+def recall_past_memory(query_text: str, n: int = 3) -> Optional[str]:
     """Search vector DB for past relevant knowledge."""
     try:
         results = memory_collection.query(query_texts=[query_text], n_results=n)
@@ -199,7 +200,7 @@ def handle_search_in_response(agent_name: str, model_id: str, answer: str, conte
 #    The most relevant agent leads. Others assist.
 # ─────────────────────────────────────────────────────────────────
 
-def determine_primary_agent(prompt: str) -> tuple[str, list[str]]:
+def determine_primary_agent(prompt: str) -> Tuple[str, List[str]]:
     """
     Returns (primary_agent, [supporting_agents])
     Primary agent leads the solution. All others support.
@@ -275,8 +276,8 @@ class CollaborativeBlackboard:
 def phase_1_individual_analysis(
     board: CollaborativeBlackboard,
     primary: str,
-    supporting: list[str],
-    memory_context: str | None
+    supporting: List[str],
+    memory_context: Optional[str]
 ) -> dict:
     """
     Phase 1: Each agent independently analyzes the problem.
@@ -339,7 +340,7 @@ def phase_1_individual_analysis(
 def phase_2_cross_collaboration(
     board: CollaborativeBlackboard,
     primary: str,
-    supporting: list[str]
+    supporting: List[str]
 ) -> dict:
     """
     Phase 2: Agents see each other's Phase 1 work and refine.
@@ -443,7 +444,7 @@ def phase_3_integration(
 def phase_4_peer_review(
     board: CollaborativeBlackboard,
     primary: str,
-    supporting: list[str],
+    supporting: List[str],
     integrated_answer: str
 ) -> str:
     """
@@ -496,7 +497,7 @@ def phase_5_omega_critic(
     primary_model: str,
     current_answer: str,
     max_attempts: int = 3
-) -> tuple[str, list[dict]]:
+) -> Tuple[str, List[dict]]:
     """
     Phase 5: Omega Critic does final quality check.
     Forces rewrites until the answer is truly excellent or max attempts reached.
