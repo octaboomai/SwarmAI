@@ -17,7 +17,13 @@ from groq import Groq
 print("[*] Waking the Hive Queen (v7.0 — Security Hardened)...")
 
 # ── Groq client ───────────────────────────────────────────────────
+# ✅ Fixed — shows clear error instead of crashing
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise EnvironmentError(
+        "GROQ_API_KEY not found! "
+        "Add it in Streamlit Cloud → Settings → Secrets"
+    )
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ── Config via environment (no hardcoded values) ──────────────────
