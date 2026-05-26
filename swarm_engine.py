@@ -1,12 +1,3 @@
-"""
-╔══════════════════════════════════════════════════════════════════╗
-║          SOVEREIGN SWARM ENGINE v6.2 - GROQ EDITION        ║
-║   All agents communicate, debate, and build on each other's work ║
-║   8B parameters × 5 agents = Team-level intelligence             ║
-║   v6.3: Fixed decommissioned models — qwen/qwen3-32b + llama-3.3-70b-versatile   ║
-╚══════════════════════════════════════════════════════════════════╝
-"""
-
 import numpy as np
 import requests
 import re
