@@ -12,7 +12,6 @@ from swarm_engine_v6 import run_swarm
 st.set_page_config(page_title="Hive Queen AI", layout="centered")
 st.title("🐝 Sovereign Swarm Engine")
 st.markdown("Powered by Local Open-Source Models, Dynamic Routing, & Self-Evolution.")
-)
 
 # ── CLEAN MINIMAL CSS ─────────────────────────────────────────────
 st.markdown("""
