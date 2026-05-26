@@ -6,7 +6,7 @@ Minimal, conversation-first design. No clutter.
 import streamlit as st
 import sys, os
 sys.path.append(os.path.dirname(__file__))
-from swarm_engine import run_swarm_engine
+from swarm_engine import run_swarm
 
 # ── PAGE CONFIG ───────────────────────────────────────────────────
 st.set_page_config(page_title="Hive Queen AI", layout="centered")
