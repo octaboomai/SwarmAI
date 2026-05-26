@@ -4,10 +4,9 @@ import os
 sys.path.append(os.path.dirname(__file__))
 from swarm_engine import run_swarm
 
-st.set_page_config(
-    page_title="SwarmAI",
-    page_icon="🐝",
-    layout="centered"
+st.set_page_config(page_title="Hive Queen AI", layout="centered")
+st.title("🐝 Sovereign Swarm Engine")
+st.markdown("Powered by Local Open-Source Models, Dynamic Routing, & Self-Evolution.")
 )
 
 st.markdown("""
