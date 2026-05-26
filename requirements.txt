@@ -1,2 +1,9 @@
+# SwarmAI — Python Dependencies
 streamlit
+groq
+chromadb
+sentence-transformers
+scikit-learn
+numpy
+duckduckgo-search
 requests
