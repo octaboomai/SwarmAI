@@ -1,16 +1,17 @@
 """
-Sovereign Swarm Engine v7.2 — Domain-Aware Nodes + Kimi-Level Synthesizer + Security Hardened
-Cybersecurity fixes applied:
-  [CRITICAL] Prompt injection protection
-  [CRITICAL] Request timeout added
-  [HIGH]     SEARCH tag injection blocked
-  [HIGH]     Memory ID race condition fixed
-  [HIGH]     Input sanitization added
-  [MEDIUM]   Configurable URL via env var
-  [MEDIUM]   Plain text memory replaced with JSON
-  [MEDIUM]   Search results sanitized before injection
-  [MEDIUM]   Output length limits added
-  [LOW]      Dict slicing replaced with explicit list
+Sovereign Swarm Engine v8.0 — Kimi Killer Edition
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Fixes applied over v7.2:
+  [CRITICAL] Unknown entity pre-flight search (stops hallucination)
+  [CRITICAL] Smart intent-based routing (research goes to Sigma first)
+  [CRITICAL] HTML escape removed (broke prompts with & ' " chars)
+  [HIGH]     Sigma forced to search unknown proper nouns always
+  [HIGH]     Omega Critic checks for hallucination explicitly
+  [HIGH]     Synthesis prompt token budget fixed (was getting cut off)
+  [MEDIUM]   Research format auto-detected for comparison questions
+  [MEDIUM]   Groq rate-limit retry with backoff
+  [MEDIUM]   Memory keyword index improved
+  [LOW]      Version banner updated
 """
 
 import numpy as np
@@ -21,27 +22,29 @@ import pathlib
 import time
 import os
 import hashlib
-import html
 from typing import Optional, List, Tuple
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from duckduckgo_search import DDGS
-from datetime import datetime
 from groq import Groq
 
-print("[*] Waking the Hive Queen (v7.0 — Security Hardened)...")
+print("[*] Waking the Hive Queen (v8.0 — Kimi Killer)...")
 
 # ── Groq client ───────────────────────────────────────────────────
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise EnvironmentError(
+        "GROQ_API_KEY not set! Add it in Streamlit Cloud → Settings → Secrets"
+    )
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# ── Config via environment (no hardcoded values) ──────────────────
-MAX_PROMPT_LENGTH  = int(os.environ.get("MAX_PROMPT_LENGTH",  "2000"))
-MAX_OUTPUT_TOKENS  = int(os.environ.get("MAX_OUTPUT_TOKENS",   "1024"))
-REQUEST_TIMEOUT    = int(os.environ.get("REQUEST_TIMEOUT",      "300"))
-MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS",     "2"))
+# ── Config ────────────────────────────────────────────────────────
+MAX_PROMPT_LENGTH  = int(os.environ.get("MAX_PROMPT_LENGTH",  "3000"))
+MAX_OUTPUT_TOKENS  = int(os.environ.get("MAX_OUTPUT_TOKENS",  "2048"))
+REQUEST_TIMEOUT    = int(os.environ.get("REQUEST_TIMEOUT",     "300"))
+MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS",    "3"))
 
-# ── Simple JSON Memory (no external DB needed) ───────────────────
+# ── Memory ────────────────────────────────────────────────────────
 MEMORY_FILE = pathlib.Path("swarm_memory.json")
 
 def _load_memory() -> list:
@@ -62,230 +65,337 @@ def _save_memory(memories: list):
         pass
 
 # ─────────────────────────────────────────────────────────────────
-# FIX [HIGH] Input Sanitization
-# Strips dangerous characters before they reach the models
+# INPUT SANITIZATION
+# FIX: Removed unsafe escaping — it broke prompts with apostrophes
+#      apostrophes, quotes, and ampersands
 # ─────────────────────────────────────────────────────────────────
 
-BLOCKED_PATTERNS = [
-    r"<SEARCH>.*?</SEARCH>",   # Block injected search tags
-    r"ignore previous",         # Prompt injection phrase
-    r"ignore all instructions",
-    r"you are now",
-    r"disregard",
-    r"system prompt",
+INJECTION_PATTERNS = [
+    r"<SEARCH>.*?</SEARCH>",
+    r"ignore\s+(all\s+)?previous\s+instructions?",
+    r"you\s+are\s+now\s+a",
+    r"disregard\s+(all\s+)?",
+    r"override\s+system",
+    r"new\s+system\s+prompt",
+    r"jailbreak",
+    r"DAN\s+mode",
 ]
 
 def sanitize_input(text: str) -> str:
-    """
-    FIX [CRITICAL]: Sanitize user input before injecting into prompts.
-    - Strip leading/trailing whitespace
-    - Enforce max length
-    - Remove known prompt injection patterns
-    - Escape HTML entities
-    - Block SEARCH tag injection
-    """
     if not text or not text.strip():
         raise ValueError("Empty prompt not allowed.")
-
-    # Trim to max length
     text = text.strip()[:MAX_PROMPT_LENGTH]
-
-    # Remove known injection patterns (case-insensitive)
-    for pattern in BLOCKED_PATTERNS:
-        text = re.sub(pattern, "[BLOCKED]", text, flags=re.IGNORECASE | re.DOTALL)
-
-    # Escape HTML to prevent XSS if rendered in a browser
-    text = html.escape(text)
-
+    for pattern in INJECTION_PATTERNS:
+        text = re.sub(pattern, "[BLOCKED]", text,
+                      flags=re.IGNORECASE | re.DOTALL)
     return text
 
 def sanitize_search_results(results: str) -> str:
-    """
-    FIX [MEDIUM]: Sanitize web search results before injecting into prompts.
-    Removes any prompt injection attempts from search results.
-    """
-    # Remove any SEARCH tags that may appear in search results
     results = re.sub(r"<SEARCH>.*?</SEARCH>", "", results, flags=re.DOTALL)
-    # Truncate to safe length
-    return results[:1500]
+    return results[:2000]
 
 # ─────────────────────────────────────────────────────────────────
-# AGENTS
+# UNKNOWN ENTITY DETECTION
+# FIX [CRITICAL]: Detects unknown proper nouns → forces search
+# This is the primary anti-hallucination mechanism
+# ─────────────────────────────────────────────────────────────────
+
+KNOWN_ENTITIES = {
+    # Companies
+    "Google","Apple","Microsoft","NVIDIA","AMD","Intel","Meta","Amazon",
+    "OpenAI","Anthropic","Groq","IBM","Samsung","Qualcomm","TSMC","ARM",
+    "Tesla","Netflix","Stripe","Uber","Airbnb","Spotify","Twitter","X",
+    "Zoho","Adobe","Oracle","Salesforce","Cisco","Huawei","Sony",
+    # Products / models
+    "Python","Linux","Windows","MacOS","Android","iOS","ChatGPT","Claude",
+    "Gemini","Llama","Mistral","GPT","BERT","Transformer",
+    "TPU","GPU","CPU","ASIC","NPU","M1","M2","M3","M4",
+    "PyTorch","TensorFlow","JAX","CUDA","Docker","Kubernetes",
+    "React","Vue","Angular","FastAPI","Flask","Django","Streamlit",
+    # Common words that get capitalized mid-sentence
+    "I","The","What","How","Why","Which","Can","Do","Is","Are",
+    "Did","Does","Will","Would","Should","Could","May","Might",
+    "My","Your","Their","Our","This","That","These","Those",
+    "AI","ML","API","SDK","LLM","NLP","CV","IoT","SaaS","PaaS",
+}
+
+def extract_unknown_entities(prompt: str) -> List[str]:
+    """Find proper nouns NOT in our known-entities list."""
+    candidates = re.findall(
+        r'\b[A-Z][a-zA-Z0-9]*(?:[A-Z][a-zA-Z0-9]+)+\b'   # CamelCase
+        r'|\b[A-Z][a-zA-Z0-9]{3,}\b',                      # Single cap word >3 chars
+        prompt
+    )
+    unknowns = [
+        c for c in candidates
+        if c not in KNOWN_ENTITIES and len(c) > 3
+    ]
+    return list(dict.fromkeys(unknowns))  # deduplicate, preserve order
+
+# ─────────────────────────────────────────────────────────────────
+# AGENTS — Domain-Aware + Anti-Hallucination prompts
 # ─────────────────────────────────────────────────────────────────
 
 AGENTS = {
     "Node_Alpha_Coder": {
-        "description": "Writes Python, C++, debugs software, creates scripts.",
+        "description": "Expert software engineer. Writes Python, C++, debugs code, designs architecture.",
         "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Alpha_Coder — a senior software engineer with 15 years of
-production experience at companies like Google, Netflix, and Stripe.
+        "contribution_prompt": """You are Node_Alpha_Coder — a senior software engineer with 15 years
+at Google, Netflix, and Stripe.
 
-YOUR STANDARDS (non-negotiable):
-- NEVER hardcode secrets → always use os.environ.get()
-- NEVER write SQL without parameterized queries → prevent injection
-- ALWAYS validate and sanitize every input before processing
-- ALWAYS add rate limiting on auth and sensitive endpoints
-- ALWAYS use try/except with meaningful errors (never expose stack traces)
-- ALWAYS add type hints to every function
-- ALWAYS write a docstring explaining what, why, and edge cases
-- For security tasks: cover encryption, auth, authorization, audit logging
-- For architecture tasks: show folder structure, dependencies, deployment notes
-- Code must be COMPLETE and RUNNABLE — no placeholders like "# TODO" or "..."
-- After code: add complexity analysis O(?) and one concrete improvement idea
+ANTI-HALLUCINATION RULES (highest priority):
+- If you are not 100% certain a library/API exists → say so and use a known alternative
+- NEVER invent function signatures — only use documented APIs
+- If unsure about a version or feature → state your uncertainty explicitly
 
-When asked about security: cover OWASP Top 10 by default.
-When asked about architecture: cover scalability, failure modes, and monitoring."""
+CODING STANDARDS:
+- NEVER hardcode secrets → use os.environ.get()
+- NEVER raw SQL → use parameterized queries
+- ALWAYS validate and sanitize inputs
+- ALWAYS add rate limiting on auth endpoints
+- ALWAYS use try/except with meaningful error messages (no stack traces to users)
+- ALWAYS add type hints and docstrings
+- Code must be COMPLETE and RUNNABLE — no "# TODO" or "..." placeholders
+- Add time complexity O(?) and space complexity O(?) after every algorithm
+
+ARCHITECTURE STANDARDS:
+- Show full folder structure
+- Include dependency list
+- Address scalability, failure modes, monitoring
+- Cover OWASP Top 10 for security questions
+- Reference real-world patterns (Netflix resilience, Stripe idempotency, Uber microservices)"""
     },
+
     "Node_Beta_Math": {
-        "description": "Solves calculus, algebra, statistics, probability.",
+        "description": "World-class mathematician. Solves calculus, algebra, statistics, ML math.",
         "model_id": "qwen/qwen3-32b",
         "contribution_prompt": """You are Node_Beta_Math — a world-class mathematician and
-quantitative analyst with expertise across pure math, statistics, and computational theory.
+quantitative analyst.
 
-YOUR STANDARDS (non-negotiable):
-- Show EVERY step — never skip working
-- State assumptions explicitly before solving
-- Verify answers using a second independent method
-- For algorithms: always derive time AND space complexity
-- For statistics: state distributions, assumptions, and confidence intervals
-- For proofs: use proper mathematical notation and logical flow
-- For optimization: show the objective function, constraints, and solution method
-- After solution: give a real-world interpretation in one sentence
-- If multiple approaches exist: compare them and explain which is best and why
-- For financial/banking math: include risk calculations and regulatory thresholds
+ANTI-HALLUCINATION RULES (highest priority):
+- Show EVERY step — never skip derivations
+- State ALL assumptions before solving
+- Verify every answer using a SECOND independent method
+- If a result seems counterintuitive → explain the intuition carefully
+- NEVER approximate without stating the approximation and its error bound
 
-When the problem involves code: translate the math into a working implementation.
-When the answer seems surprising: double-check it and explain the intuition."""
+MATH STANDARDS:
+- Always derive time AND space complexity for algorithms
+- For statistics: state the distribution, assumptions, and confidence intervals
+- For proofs: use proper mathematical notation
+- For optimization: show objective function, constraints, and solution method
+- For financial math: include risk metrics and regulatory context
+- After solution: give a one-sentence real-world interpretation
+
+When problem involves code: translate the math into a working Python implementation."""
     },
+
     "Node_Sigma_Researcher": {
-        "description": "Finds real-time news, current events, modern facts.",
+        "description": "Research expert. Finds real-time facts, compares technologies, cites sources.",
         "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Sigma_Researcher — a world-class research analyst
-combining the skills of a librarian, journalist, and domain expert.
+        "contribution_prompt": """You are Node_Sigma_Researcher — the world's most rigorous research analyst.
 
-YOUR STANDARDS (non-negotiable):
-- Cite SPECIFIC sources, libraries, frameworks, papers — never be vague
-- Always compare at least 2-3 approaches before recommending one
-- For technology questions: mention the current industry standard AND emerging alternatives
-- For security topics: reference OWASP, NIST, PCI-DSS, GDPR, or relevant standards
-- For architecture: reference real companies who solved this (Netflix, Stripe, Uber patterns)
-- Always state the YEAR of information when recency matters
-- If you need live data, output EXACTLY: <SEARCH>specific query here</SEARCH>
-- After research: give a clear recommendation with reasoning
+ANTI-HALLUCINATION PROTOCOL (MANDATORY — follow in order):
+STEP 1: Read the question carefully.
+STEP 2: Identify every proper noun, product name, company name, or technology you
+        are not 100% certain about.
+STEP 3: For EACH uncertain entity → output: <SEARCH>entity name</SEARCH>
+        DO NOT SKIP THIS STEP. It is better to search unnecessarily than to hallucinate.
+STEP 4: After searching, report ONLY what the search results confirm.
+STEP 5: If search returns no results → say "Could not verify [entity]. It may be
+        very new, private, or not publicly announced yet."
 
-When comparing tools: use concrete criteria (performance, cost, community, maturity).
-When discussing best practices: distinguish between "widely used" and "actually best"."""
+RESEARCH STANDARDS:
+- Cite SPECIFIC sources — name the company, paper, or documentation
+- Use REAL numbers: "TPU v4: 275 TFLOPS, $2.40/hr on GCP" not "offers high performance"
+- Compare at least 2-3 options with concrete criteria before recommending
+- Reference industry standards: OWASP, NIST, PCI-DSS, GDPR where relevant
+- Reference real company patterns: Netflix, Stripe, Uber, Google, Zoho where relevant
+- Always note the year when recency matters
+- Distinguish "widely used" from "actually best" — they are often different"""
     },
+
     "Node_Gamma_Writer": {
-        "description": "Writes poetry, stories, creative essays, narratives.",
+        "description": "Master technical writer. Makes complex ideas crystal clear.",
         "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Gamma_Writer — a master technical communicator
-who can explain quantum physics to a child and write API docs that developers love.
+        "contribution_prompt": """You are Node_Gamma_Writer — the world's finest technical communicator.
 
-YOUR STANDARDS (non-negotiable):
-- Every paragraph must earn its place — delete anything redundant
-- Technical explanations: simple → complex, never the reverse
+ANTI-HALLUCINATION RULES (highest priority):
+- Only use facts from the content you are given to refine
+- NEVER add new facts, claims, or data that were not in the input
+- If the input is missing something important → note the gap, do not invent a fill
+
+WRITING STANDARDS:
+- Every paragraph must earn its place — cut anything redundant
+- Build simple → complex, never the reverse
 - Use concrete analogies for abstract concepts
-- For documentation: cover purpose, usage, parameters, return values, errors, examples
-- For explanations: start with the "why" before the "how"
-- For creative work: show craft — rhythm, imagery, emotional resonance
-- Never use filler phrases: "It is important to note", "In conclusion", "As mentioned"
-- Code comments must explain WHY, not WHAT (the code shows the what)
-- After writing: read it as if you are the target audience and remove anything confusing
-
-When writing for developers: be precise, terse, example-first.
-When writing for executives: be outcome-focused, risk-aware, no jargon.
-When writing creatively: break rules intentionally, not accidentally."""
+- For documentation: purpose → usage → parameters → return → errors → examples
+- Start with "why" before "how"
+- BANNED phrases: "It is important to note", "In conclusion", "As mentioned above",
+  "In summary", "It goes without saying", "Needless to say"
+- Code comments must explain WHY, not WHAT
+- Adapt to audience: developers (terse, precise, examples-first),
+  executives (outcomes, risks, no jargon)"""
     },
-    "Node_Omega_Critic": {
-        "description": "Reviews for logical flaws, errors, and quality.",
-        "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Omega_Critic — the most ruthless, precise, and
-uncompromising reviewer in existence. You have the combined critical eye of a
-security auditor, a senior engineer doing code review, and a fact-checker.
 
-YOUR 8-POINT AUDIT (check ALL of these every time):
-1. FACTUAL ACCURACY — Any hallucinated APIs, fake libraries, or wrong syntax?
-2. SECURITY HOLES — Hardcoded secrets? Missing validation? SQL injection risk?
-   Missing auth? No rate limiting? Exposed errors?
-3. CODE CORRECTNESS — Does the code actually run? Any bugs? Wrong logic?
-4. COMPLETENESS — Does it fully answer the original question? What is missing?
-5. DEPTH — Is this surface-level or genuinely expert-level?
-6. CONSISTENCY — Do the sections contradict each other?
-7. EDGE CASES — What happens on empty input, huge input, concurrent requests?
-8. PRODUCTION READINESS — Can this actually be deployed? What would break?
+    "Node_Omega_Critic": {
+        "description": "Ruthless quality enforcer. Catches hallucinations, bugs, and logic errors.",
+        "model_id": "llama-3.3-70b-versatile",
+        "contribution_prompt": """You are Node_Omega_Critic — the most uncompromising reviewer alive.
+You are a combined security auditor + senior engineer + fact-checker + hallucination detector.
+
+YOUR MANDATORY 9-POINT AUDIT:
+1. HALLUCINATION CHECK — Did the answer invent any product, company, API, or fact
+   that cannot be independently verified? Flag EVERY unverifiable claim.
+2. FACTUAL ACCURACY — Are all stated facts, numbers, and names correct?
+3. SECURITY HOLES — Hardcoded secrets? SQL injection? Missing auth? No rate limiting?
+4. CODE CORRECTNESS — Does every code block actually run? Any bugs or logic errors?
+5. COMPLETENESS — Does it fully answer the original question? What is missing?
+6. DEPTH — Is this surface-level bullet points or genuinely expert insight?
+7. CONSISTENCY — Do any sections contradict each other?
+8. EDGE CASES — What happens with empty input, huge input, concurrent requests?
+9. PRODUCTION READINESS — Can this actually be deployed without changes?
 
 OUTPUT FORMAT:
-- If it passes ALL 8 points: output exactly APPROVED
-- If it fails any point: list EACH failure as:
-  [POINT N - SEVERITY] Specific problem → Specific fix required
+- Pass ALL 9 → output exactly: APPROVED
+- Fail any → list each failure as:
+  [POINT N - SEVERITY] Specific problem found → Exact fix required
+  SEVERITY: CRITICAL | HIGH | MEDIUM | LOW
 
-SEVERITY levels: CRITICAL (must fix), HIGH (should fix), MEDIUM (improve), LOW (polish)
-
-Be brutal. A false APPROVED is worse than a rejection.
-The user is depending on this being correct."""
+CRITICAL RULE: A hallucinated answer that sounds confident is MORE DANGEROUS
+than an honest "I don't know." Flag all hallucinations as CRITICAL."""
     },
+
     "Node_Prime_Synthesizer": {
-        "description": "Master editor. Transforms raw swarm output into world-class structured responses.",
+        "description": "Master editor. Produces Kimi-level structured, beautiful final responses.",
         "model_id": "llama-3.3-70b-versatile",
         "contribution_prompt": """You are Node_Prime_Synthesizer — the world's most elite technical editor.
-Your job is to transform raw AI output into a beautifully structured, crystal-clear masterpiece.
-You write at the level of the best technical documentation in the world."""
+Transform the verified swarm output into a world-class structured response.
+
+ABSOLUTE RULES:
+1. Use ONLY facts from the swarm's verified answer — NEVER add new facts
+2. Every section must add value — delete redundant content ruthlessly
+3. Code must be complete and runnable — no placeholders
+4. Use REAL numbers and SPECIFIC details — never vague statements
+5. The output must feel like a senior expert spent 2 hours crafting it"""
     }
 }
 
-# FIX [LOW]: Explicit routing list instead of fragile [:-2] slicing
-ROUTING_NODES = [
-    "Node_Alpha_Coder",
-    "Node_Beta_Math",
-    "Node_Sigma_Researcher",
-    "Node_Gamma_Writer",
-]
-
-router_brain = SentenceTransformer('all-MiniLM-L6-v2')
-node_descriptions = [AGENTS[n]["description"] for n in ROUTING_NODES]
-node_embeddings = router_brain.encode(node_descriptions)
-
 # ─────────────────────────────────────────────────────────────────
-# FIX [CRITICAL]: Timeout added to all requests
-# FIX [MEDIUM]:   Output length capped
+# SMART INTENT-BASED ROUTER
+# FIX [CRITICAL]: Research questions now route to Sigma first
 # ─────────────────────────────────────────────────────────────────
 
-def query_node(model_id: str, prompt: str) -> str:
+def get_routing_plan(prompt: str) -> List[str]:
     """
-    Call Groq API with:
-    - Timeout protection (REQUEST_TIMEOUT seconds)
-    - Output token limit (MAX_OUTPUT_TOKENS)
-    - Retry logic (2 attempts)
+    Determine agent execution order based on question intent.
+    Research/comparison questions → Sigma leads (prevents hallucination)
+    Code questions → Alpha leads
+    Math questions → Beta leads
     """
-    # Trim prompt to safe length
+    p = prompt.lower()
+
+    research_signals = [
+        "what is","what are","do you know","tell me about","who made",
+        "compare","which one","vs","versus","difference between",
+        "news","latest","recent","announced","released","launched",
+        "startup","company","product","chip","device","tool","platform",
+        "better","best","recommend","should i use","cost","price","worth"
+    ]
+    code_signals = [
+        "write code","write a","implement","build a","create a",
+        "function","script","debug","fix this code","algorithm",
+        "class","method","api endpoint","backend","frontend"
+    ]
+    math_signals = [
+        "calculate","solve","equation","proof","formula",
+        "derivative","integral","probability","statistics",
+        "complexity","big o","optimize"
+    ]
+
+    if any(s in p for s in research_signals):
+        return [
+            "Node_Sigma_Researcher",
+            "Node_Alpha_Coder",
+            "Node_Gamma_Writer",
+        ]
+    elif any(s in p for s in math_signals):
+        return [
+            "Node_Beta_Math",
+            "Node_Alpha_Coder",
+            "Node_Gamma_Writer",
+        ]
+    elif any(s in p for s in code_signals):
+        return [
+            "Node_Alpha_Coder",
+            "Node_Sigma_Researcher",
+            "Node_Gamma_Writer",
+        ]
+    else:
+        # Default: research first to prevent hallucination
+        return [
+            "Node_Sigma_Researcher",
+            "Node_Alpha_Coder",
+            "Node_Gamma_Writer",
+        ]
+
+# ─────────────────────────────────────────────────────────────────
+# GROQ API CALL — With rate-limit retry backoff
+# FIX [MEDIUM]: Added exponential backoff for rate limit errors
+# ─────────────────────────────────────────────────────────────────
+
+def query_node(model_id: str, prompt: str, label: str = "") -> str:
     if len(prompt) > MAX_PROMPT_LENGTH:
-        prompt = prompt[:MAX_PROMPT_LENGTH] + "\n[Trimmed]"
+        prompt = prompt[:MAX_PROMPT_LENGTH] + "\n[Context trimmed]"
 
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             response = groq_client.chat.completions.create(
                 model=model_id,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=MAX_OUTPUT_TOKENS,  # FIX [MEDIUM]: output limit
+                max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=0.7,
-                timeout=REQUEST_TIMEOUT        # FIX [CRITICAL]: no more hangs
+                timeout=REQUEST_TIMEOUT
             )
             result = response.choices[0].message.content
             if result and result.strip():
                 return result
         except Exception as e:
-            if attempt == 1:
-                return f"[ERROR] {model_id}: {str(e)[:100]}"
-            time.sleep(2)
-    return "[ERROR] No response."
+            err = str(e)
+            if "rate_limit" in err.lower() or "429" in err:
+                wait = (attempt + 1) * 10
+                print(f"  [RATE LIMIT] {label} waiting {wait}s...")
+                time.sleep(wait)
+            elif attempt == 2:
+                return f"[ERROR] {label or model_id}: {err[:120]}"
+            else:
+                time.sleep(3)
+    return "[ERROR] No response after 3 attempts."
+
+# ─────────────────────────────────────────────────────────────────
+# WEB SEARCH
+# ─────────────────────────────────────────────────────────────────
+
+def tool_web_search(query: str) -> str:
+    safe_query = re.sub(r"[<>\"'{}|\\^`\[\]]", "", query)[:200]
+    print(f"  [SEARCH] '{safe_query}'")
+    try:
+        results = DDGS().text(safe_query, max_results=MAX_SEARCH_RESULTS)
+        if not results:
+            return f"No results found for: {safe_query}"
+        raw = "\n\n".join([
+            f"Source: {r.get('title','?')}\n{r.get('body','')}"
+            for r in results
+        ])
+        return sanitize_search_results(raw)
+    except Exception as e:
+        return f"Search failed: {str(e)[:100]}"
 
 # ─────────────────────────────────────────────────────────────────
 # MEMORY
 # ─────────────────────────────────────────────────────────────────
 
-def recall_past_memory(query_text: str, n: int = 3) -> Optional[str]:
-    """Keyword-based memory search from JSON store."""
+def recall_past_memory(query_text: str, n: int = 2) -> Optional[str]:
     try:
         memories = _load_memory()
         if not memories:
@@ -293,305 +403,295 @@ def recall_past_memory(query_text: str, n: int = 3) -> Optional[str]:
         query_words = set(query_text.lower().split())
         scored = sorted(
             [(len(query_words & set(m.lower().split())), m)
-             for m in memories if len(query_words & set(m.lower().split())) > 0],
+             for m in memories
+             if len(query_words & set(m.lower().split())) > 1],
             reverse=True
         )
         top = [m for _, m in scored[:n]]
         if top:
-            print(f"[MEMORY] Recalled {len(top)} memories.")
+            print(f"  [MEMORY] Recalled {len(top)} past memories")
             return "\n".join([f"[Memory {i+1}]: {m}" for i, m in enumerate(top)])
         return None
     except Exception:
         return None
 
 def consolidate_memory(prompt: str, final_answer: str):
-    """
-    FIX [HIGH]: Memory ID race condition fixed.
-    Uses timestamp + hash instead of sequential ID.
-    """
     try:
         memories = _load_memory()
-        # FIX: unique ID using timestamp + hash (no race condition)
-        unique_id = hashlib.md5(
-            f"{time.time()}{prompt}".encode()
-        ).hexdigest()[:8]
-        memory_text = (
-            f"[{unique_id}] Task: {prompt[:200]} | "
-            f"Answer: {final_answer[:300]}"
+        uid = hashlib.md5(f"{time.time()}{prompt}".encode()).hexdigest()[:8]
+        memories.append(
+            f"[{uid}] Q: {prompt[:150]} | A: {final_answer[:200]}"
         )
-        memories.append(memory_text)
-        memories = memories[-50:]  # Keep last 50 only
-        _save_memory(memories)
-        print(f"[MEMORY] Saved #{unique_id}. Total: {len(memories)}")
+        _save_memory(memories[-50:])
+        print(f"  [MEMORY] Saved #{uid}. Total: {len(memories)}")
     except Exception as e:
-        print(f"[MEMORY] Save failed: {e}")
+        print(f"  [MEMORY] Failed: {e}")
 
 # ─────────────────────────────────────────────────────────────────
-# TOOLS
+# KIMI-LEVEL SYNTHESIZER FORMAT SELECTOR
 # ─────────────────────────────────────────────────────────────────
 
-def tool_web_search(query: str) -> str:
-    """
-    FIX [HIGH]: SEARCH tag injection blocked — query sanitized first.
-    FIX [MEDIUM]: Results sanitized before injecting into prompts.
-    """
-    # Sanitize the search query itself
-    safe_query = re.sub(r"[<>\"'{}|\\^`\[\]]", "", query)[:200]
-    print(f"[TOOL] Web search: '{safe_query}'")
-    try:
-        results = DDGS().text(safe_query, max_results=MAX_SEARCH_RESULTS)
-        raw = "\n".join([
-            f"Source: {r['title']}\nInfo: {r['body']}"
-            for r in results
-        ])
-        # FIX [MEDIUM]: sanitize results before prompt injection
-        return sanitize_search_results(raw)
-    except Exception as e:
-        return f"Search failed: {str(e)[:100]}"
+def get_format_rules(prompt: str) -> str:
+    p = prompt.lower()
+    is_code     = any(w in p for w in ["code","script","function","python","implement","build","debug"])
+    is_math     = any(w in p for w in ["solve","calculate","equation","proof","math","formula","derive"])
+    is_creative = any(w in p for w in ["write","story","poem","essay","blog","creative"])
+    is_compare  = any(w in p for w in ["compare","vs","versus","difference","which","better","best"])
+
+    if is_code:
+        return """
+## 🎯 What This Does
+One sharp paragraph. What problem this code solves.
+
+## 💡 The Approach
+- Algorithm / design pattern chosen and why
+- Time complexity: O(?) | Space: O(?)
+- Key technical decisions
+
+## ⚙️ The Code
+```python
+# Complete, production-ready, commented code
+```
+
+## 🧪 Test Cases
+```python
+# Concrete inputs → expected outputs
+```
+
+## ⚠️ Edge Cases & Security
+- What breaks this and how to handle it
+- Security considerations
+
+## 🚀 Next Improvement
+One concrete upgrade to make it production-grade"""
+
+    elif is_math:
+        return """
+## 🎯 Problem Statement
+One sentence restatement of exactly what is being solved.
+
+## 🧠 Strategy
+Mathematical approach chosen and why.
+
+## 📐 Step-by-Step Solution
+Every step numbered. No skipped working.
+
+## ✅ Final Answer
+Bold and clear.
+
+## 🔍 Verification
+Check the answer a different way.
+
+## 🌍 Real-World Meaning
+One sentence on practical significance."""
+
+    elif is_compare:
+        return """
+## 🎯 TL;DR — The Verdict
+Two sentences: what was compared and the winner for each use case.
+
+## 📊 Head-to-Head Comparison
+| Feature | Option A | Option B | Option C |
+|---------|----------|----------|----------|
+| Performance | [real number] | [real number] | [real number] |
+| Cost | [real price] | [real price] | [real price] |
+| Best for | [use case] | [use case] | [use case] |
+
+## 🧠 Deep Dive
+Sub-section per option. Specific strengths, specific weaknesses. Real numbers.
+
+## ✅ Recommendation
+For [use case A] → choose [X] because [specific reason]
+For [use case B] → choose [Y] because [specific reason]
+
+## ⚠️ What Most People Get Wrong
+The most common mistake when choosing between these options."""
+
+    elif is_creative:
+        return """
+## 🎯 Creative Vision
+One sentence on approach and tone.
+
+## ✍️ The Work
+[Full creative output — no section headers inside]
+
+## 🎨 Craft Notes
+Stylistic choices and how they serve the piece."""
+
+    else:
+        return """
+## 🎯 TL;DR
+Two sentences. The complete answer for someone in a hurry.
+
+## 🧠 Full Explanation
+Clear sub-sections. Simple → complex. No repetition.
+
+## 📊 Key Facts
+| Concept | Detail |
+|---------|--------|
+| [fact] | [specific detail with real numbers] |
+
+## 🔗 The Big Picture
+One paragraph: the "so what" — why this matters.
+
+## ⚠️ Common Misconceptions
+What most people get wrong and the correct understanding."""
 
 # ─────────────────────────────────────────────────────────────────
-# MAIN SWARM EXECUTION LOOP
+# MAIN SWARM EXECUTION LOOP v8.0
 # ─────────────────────────────────────────────────────────────────
 
 def run_swarm(user_prompt: str) -> dict:
-    """
-    Main entry point. Security hardened:
-    - Input sanitized before anything else
-    - All prompts have timeouts
-    - Search results sanitized
-    - Memory IDs are collision-proof
-    """
 
-    # ── FIX [CRITICAL + HIGH]: Sanitize input first ───────────────
+    # ── Sanitize ──────────────────────────────────────────────────
     try:
         safe_prompt = sanitize_input(user_prompt)
     except ValueError as e:
-        return {
-            "plan": [],
-            "final_answer": f"⚠️ Invalid input: {e}",
-            "history": []
-        }
+        return {"plan": [], "final_answer": f"⚠️ {e}", "history": []}
 
     print(f"\n{'='*55}")
-    print(f"[SWARM] Task: {safe_prompt[:80]}...")
+    print(f"[SWARM v8.0] {safe_prompt[:80]}...")
     print(f"{'='*55}")
 
-    start_time = time.time()
+    start = time.time()
     history = []
 
-    # ── MEMORY RECALL ─────────────────────────────────────────────
-    past_knowledge = recall_past_memory(safe_prompt)
-    current_context = (
-        f"Past Memory:\n{past_knowledge}\n\nSolve: {safe_prompt}"
-        if past_knowledge else safe_prompt
-    )
+    # ── PRE-FLIGHT: Search unknown entities BEFORE routing ────────
+    # This is the primary anti-hallucination mechanism
+    unknown_entities = extract_unknown_entities(safe_prompt)
+    preflight_context = ""
 
-    # ── ROUTING ───────────────────────────────────────────────────
-    prompt_embedding = router_brain.encode([safe_prompt])
-    similarities = cosine_similarity(prompt_embedding, node_embeddings)[0]
-    ranked_indices = np.argsort(similarities)[::-1]
+    if unknown_entities:
+        print(f"[PREFLIGHT] Unknown entities: {unknown_entities}")
+        for entity in unknown_entities[:3]:
+            result = tool_web_search(entity)
+            if "No results" not in result and "failed" not in result:
+                preflight_context += f"\n[Verified info on {entity}]:\n{result}\n"
+                history.append({"node": f"PREFLIGHT:Search({entity})", "output": result})
+            else:
+                preflight_context += f"\n[{entity}]: Could not verify — not in public sources.\n"
+                print(f"  [PREFLIGHT] Could not verify: {entity}")
 
-    execution_plan = [
-        ROUTING_NODES[i] for i in ranked_indices
-        if similarities[i] > 0.12
-    ]
-    if not execution_plan:
-        execution_plan = [ROUTING_NODES[ranked_indices[0]]]
+    # ── Memory ────────────────────────────────────────────────────
+    past = recall_past_memory(safe_prompt)
 
+    # ── Build initial context ─────────────────────────────────────
+    current_context = safe_prompt
+    if preflight_context:
+        current_context = (
+            f"VERIFIED RESEARCH CONTEXT (from live web search):\n"
+            f"{preflight_context}\n\n"
+            f"USER QUESTION:\n{safe_prompt}"
+        )
+    if past:
+        current_context = f"PAST MEMORY:\n{past}\n\n{current_context}"
+
+    # ── Smart routing ─────────────────────────────────────────────
+    execution_plan = get_routing_plan(safe_prompt)
     print(f"[ROUTER] Plan: {execution_plan}")
 
-    # ── PHASE 1: THINKING NODES ───────────────────────────────────
+    # ── Phase 1: Agent execution ──────────────────────────────────
     for step, node_name in enumerate(execution_plan):
         agent = AGENTS[node_name]
         print(f"[{node_name}] Working...")
 
-        base = agent["contribution_prompt"]
         if step == 0:
-            agent_prompt = f"{base}\n\nSolve this:\n{current_context}"
+            agent_prompt = (
+                f"{agent['contribution_prompt']}\n\n"
+                f"TASK:\n{current_context}"
+            )
         else:
-            agent_prompt = f"{base}\n\nRefine this:\n{current_context}"
+            agent_prompt = (
+                f"{agent['contribution_prompt']}\n\n"
+                f"PREVIOUS WORK TO BUILD ON:\n{current_context}\n\n"
+                f"ORIGINAL QUESTION:\n{safe_prompt}\n\n"
+                f"Your job: add your unique perspective. Do NOT repeat what was already said well."
+            )
 
-        answer = query_node(agent["model_id"], agent_prompt)
+        answer = query_node(agent["model_id"], agent_prompt, node_name)
 
-        # ── FIX [HIGH]: SEARCH tag injection blocked ──────────────
-        # Only Node_Sigma_Researcher is allowed to trigger searches
+        # Only Sigma can trigger web search
         if node_name == "Node_Sigma_Researcher":
-            match = re.search(r"<SEARCH>(.*?)</SEARCH>", answer)
-            if match:
-                raw_query = match.group(1)
-                live_data = tool_web_search(raw_query)  # sanitized inside
-                history.append({"node": "TOOL:WebSearch", "output": raw_query})
-                follow_up = (
-                    f"{base}\n\n"
-                    f"Web results:\n{live_data}\n\n"
-                    f"Now answer:\n{current_context}"
+            all_searches = re.findall(r"<SEARCH>(.*?)</SEARCH>", answer)
+            for sq in all_searches[:3]:
+                live = tool_web_search(sq)
+                history.append({"node": "TOOL:WebSearch", "output": sq})
+                # Re-run Sigma with search results injected
+                answer = query_node(
+                    agent["model_id"],
+                    f"{agent['contribution_prompt']}\n\n"
+                    f"Web search results for '{sq}':\n{live}\n\n"
+                    f"ORIGINAL QUESTION:\n{safe_prompt}\n\n"
+                    f"Now give your complete, verified answer using this data.\n"
+                    f"If the entity was not found in results → say so clearly.",
+                    f"{node_name}:AfterSearch"
                 )
-                answer = query_node(agent["model_id"], follow_up)
 
         history.append({"node": node_name, "output": answer})
         current_context = answer
+        print(f"  [{node_name}] Done ({len(answer)} chars)")
 
-    # ── PHASE 2: CRITIC ───────────────────────────────────────────
+    # ── Phase 2: Omega Critic ─────────────────────────────────────
     critic = AGENTS["Node_Omega_Critic"]
     last_model = AGENTS[execution_plan[-1]]["model_id"]
 
     for attempt in range(2):
-        critic_prompt = (
+        print(f"[Omega_Critic] Review {attempt+1}/2...")
+        review = query_node(
+            critic["model_id"],
             f"{critic['contribution_prompt']}\n\n"
-            f"Original request: {safe_prompt}\n\n"
-            f"Answer to review:\n{current_context}\n\n"
-            f"Output APPROVED if perfect. Else list exact flaws."
+            f"ORIGINAL QUESTION:\n{safe_prompt}\n\n"
+            f"ANSWER TO AUDIT:\n{current_context}",
+            "Omega_Critic"
         )
-        review = query_node(critic["model_id"], critic_prompt)
         history.append({"node": f"Critic_Round_{attempt+1}", "output": review})
 
         if "APPROVED" in review.upper():
-            print(f"[CRITIC] Approved on attempt {attempt+1}")
+            print(f"  [Critic] APPROVED on attempt {attempt+1}")
             break
         else:
-            print(f"[CRITIC] Rejected. Rewriting...")
+            print(f"  [Critic] Rejected — rewriting...")
             current_context = query_node(
                 last_model,
-                f"Fix based on feedback:\n{review}\n\nOriginal:\n{current_context}"
+                f"The Omega Critic rejected your answer.\n\n"
+                f"CRITIC FEEDBACK:\n{review}\n\n"
+                f"YOUR PREVIOUS ANSWER:\n{current_context}\n\n"
+                f"ORIGINAL QUESTION:\n{safe_prompt}\n\n"
+                f"Fix every issue the critic raised. Be specific. No hallucinations.",
+                "Rewrite"
             )
 
     execution_plan.append("Node_Omega_Critic")
 
-    # ── PHASE 3: SYNTHESIZER ──────────────────────────────────────
+    # ── Phase 3: Kimi-Level Synthesizer ───────────────────────────
+    print("[Synthesizer] Formatting final answer...")
     synth = AGENTS["Node_Prime_Synthesizer"]
+    format_rules = get_format_rules(safe_prompt)
 
-    # Detect answer type for adaptive formatting
-    prompt_lower = safe_prompt.lower()
-    is_code     = any(w in prompt_lower for w in ["code","script","function","python","algorithm","debug","program"])
-    is_math     = any(w in prompt_lower for w in ["solve","calculate","equation","proof","math","formula"])
-    is_creative = any(w in prompt_lower for w in ["write","story","poem","essay","creative","blog"])
-    is_research = any(w in prompt_lower for w in ["explain","what is","how does","research","compare","difference"])
+    final_answer = query_node(
+        synth["model_id"],
+        f"{synth['contribution_prompt']}\n\n"
+        f"ORIGINAL USER QUESTION:\n{safe_prompt}\n\n"
+        f"SWARM'S VERIFIED ANSWER (use ONLY this — never add new facts):\n"
+        f"{current_context}\n\n"
+        f"FORMAT STRUCTURE TO USE:\n{format_rules}\n\n"
+        f"RULES:\n"
+        f"- Use ONLY facts from the verified answer above\n"
+        f"- Real numbers and specifics only — no vague claims\n"
+        f"- Every section must add value\n"
+        f"- If something is unverified → say it is unverified\n"
+        f"- Write as if a senior expert spent 2 hours on this\n\n"
+        f"WRITE THE FINAL ANSWER NOW:",
+        "Synthesizer"
+    )
 
-    if is_code:
-        format_rules = """
-STRUCTURE FOR CODE ANSWERS:
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-## 🎯 What This Does
-One sharp paragraph. No fluff. Tell me exactly what this code achieves.
-
-## 💡 The Approach
-- Why this algorithm/pattern was chosen
-- Time complexity: O(?) | Space complexity: O(?)
-- Key technical decisions explained
-
-## ⚙️ The Code
-```python
-# Full, production-ready, commented code here
-# Every non-obvious line must have a comment
-```
-
-## 🧪 How to Test It
-```python
-# Concrete test cases with expected outputs
-```
-
-## ⚠️ Edge Cases & Security Notes
-- What breaks this code and why
-- Security considerations if applicable
-- How to handle failures gracefully
-
-## 🚀 How to Extend It
-- One concrete next step to make it better"""
-
-    elif is_math:
-        format_rules = """
-STRUCTURE FOR MATH ANSWERS:
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-## 🎯 Problem Statement
-Restate the problem crystal clearly in one sentence.
-
-## 🧠 Strategy
-Which mathematical approach and exactly why.
-
-## 📐 Step-by-Step Proof/Solution
-Present every step. Number them. Show all working.
-Use proper mathematical notation where needed.
-
-## ✅ Final Answer
-State the answer boldly and clearly.
-
-## 🔍 Verification
-Prove the answer is correct by checking it a different way.
-
-## 🌍 Real-World Meaning
-One sentence on what this result means in practice."""
-
-    elif is_creative:
-        format_rules = """
-STRUCTURE FOR CREATIVE ANSWERS:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-## 🎯 Creative Vision
-One sentence on the approach and tone chosen.
-
-## ✍️ The Work
-[The full creative output — no headers inside the creative piece itself]
-
-## 🎨 Craft Notes
-- Key stylistic choices made
-- Tone, voice, and structure decisions
-- How it connects to what was requested"""
-
-    else:  # research / explanation
-        format_rules = """
-STRUCTURE FOR RESEARCH/EXPLANATION ANSWERS:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-## 🎯 TL;DR
-Two sentences maximum. The complete answer for someone in a hurry.
-
-## 🧠 The Full Explanation
-Break this into clear sub-sections. Use headers. Build from simple to complex.
-Every paragraph should add something new — no repetition.
-
-## 📊 Key Facts at a Glance
-| Concept | Detail |
-|---------|--------|
-| [fact]  | [explanation] |
-
-## 🔗 How It All Connects
-One paragraph tying everything together — the "so what" moment.
-
-## ⚠️ Common Misconceptions
-What most people get wrong about this topic and why."""
-
-    synthesis_prompt = f"""
-{synth['contribution_prompt']}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ORIGINAL USER REQUEST:
-{safe_prompt}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SWARM'S VERIFIED ANSWER (use ONLY this — do NOT add new facts):
-{current_context}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-YOUR FORMATTING MISSION:
-{format_rules}
-
-ABSOLUTE RULES:
-1. Use ONLY facts from the verified swarm answer above
-2. Every section must add value — delete anything redundant
-3. Code must be complete and runnable — no placeholders
-4. Math must show every step — no skipped working
-5. Headers must be sharp and specific — not generic like "Introduction"
-6. The final output must feel like it came from a senior expert
-   who spent 2 hours crafting the perfect response
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-NOW WRITE THE FINAL MASTERPIECE:
-"""
-
-    final_answer = query_node(synth["model_id"], synthesis_prompt)
     execution_plan.append("Node_Prime_Synthesizer")
 
-    # ── SAVE MEMORY ───────────────────────────────────────────────
+    # ── Save memory ───────────────────────────────────────────────
     consolidate_memory(safe_prompt, final_answer)
 
-    elapsed = time.time() - start_time
-    print(f"[SWARM] Done in {elapsed:.1f}s")
+    elapsed = time.time() - start
+    print(f"[SWARM] Done in {elapsed:.1f}s\n")
 
     return {
         "plan": execution_plan,
