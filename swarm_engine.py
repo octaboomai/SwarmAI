@@ -41,7 +41,7 @@ AGENTS = {
         "model_id": "llama-3.3-70b-versatile",
         "prompt": "You are a Coder. Write the requested code perfectly."
     },
-    "Node_Prime_Synthesizer": {
+     "Node_Prime_Synthesizer": {
         "model_id": "llama-3.3-70b-versatile",
         "prompt": """You are the Hive Queen Synthesizer. 
         Read the Raw Dossier and format the final answer.
@@ -49,8 +49,20 @@ AGENTS = {
         HARD SYSTEM LOCKS (FAILURE TO FOLLOW WILL RESULT IN TERMINATION):
         1. DO NOT write "Introduction", "Conclusion", or "Summary".
         2. DO NOT write ANY Python, HTML, or code blocks unless the original prompt asked for it.
-        3. Write like a sharp, elite technology analyst. Use bullet points and bold text.
-        4. Get straight to the point in the very first sentence."""
+        3. DO NOT repeat the same fact multiple times. Be concise.
+        
+        FORMAT YOUR ANSWER EXACTLY LIKE THIS:
+        
+        🎯 **The Bottom Line**
+        (Write a sharp 2-sentence direct answer to the user's question here).
+        
+        🧠 **Market Reality**
+        (Explain the context. Why is it 28nm? What does 2nm actually require?)
+        
+        📊 **Key Data Points**
+        - (Bullet point 1)
+        - (Bullet point 2)
+        - (Bullet point 3)"""
     },
     "Node_Omega_Critic": {
         "model_id": "llama-3.3-70b-versatile",
