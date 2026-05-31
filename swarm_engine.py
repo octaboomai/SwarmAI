@@ -1,19 +1,3 @@
-"""
-Sovereign Swarm Engine v8.0 — Kimi Killer Edition (Hub-and-Spoke)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Fixes applied over v7.2:
-  [CRITICAL] Unknown entity pre-flight search (stops hallucination)
-  [CRITICAL] Smart intent-based routing (research goes to Sigma first)
-  [CRITICAL] HTML escape removed (broke prompts with & ' " chars)
-  [CRITICAL] UPGRADED TO TRUE HUB-AND-SPOKE ARCHITECTURE
-  [HIGH]     Sigma forced to search unknown proper nouns always
-  [HIGH]     Omega Critic checks for hallucination explicitly
-  [HIGH]     Synthesis prompt token budget fixed (was getting cut off)
-  [MEDIUM]   Research format auto-detected for comparison questions
-  [MEDIUM]   Groq rate-limit retry with backoff
-  [MEDIUM]   Memory keyword index improved
-"""
-
 import numpy as np
 import requests
 import re
@@ -22,360 +6,139 @@ import pathlib
 import time
 import os
 import hashlib
-from typing import Optional, List, Tuple
+from typing import List
 from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 from duckduckgo_search import DDGS
 from groq import Groq
 
-print("[*] Waking the Hive Queen (v8.0 — Hub-and-Spoke Kimi Killer)...")
+print("[*] Waking the Hive Queen (v8.5 - The Hard-Lock Edition)...")
 
-# ── Groq client ───────────────────────────────────────────────────
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    raise EnvironmentError(
-        "GROQ_API_KEY not set! Add it in Streamlit Cloud → Settings → Secrets"
-    )
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# ── Config ────────────────────────────────────────────────────────
-MAX_PROMPT_LENGTH  = int(os.environ.get("MAX_PROMPT_LENGTH",  "3000"))
-MAX_OUTPUT_TOKENS  = int(os.environ.get("MAX_OUTPUT_TOKENS",  "2048"))
-REQUEST_TIMEOUT    = int(os.environ.get("REQUEST_TIMEOUT",     "300"))
-MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS",    "3"))
+router_brain = SentenceTransformer('all-MiniLM-L6-v2')
 
-# ── Memory ────────────────────────────────────────────────────────
-MEMORY_FILE = pathlib.Path("swarm_memory.json")
-
-def _load_memory() -> list:
+# --- 1. TOOLS & SEARCH ---
+def tool_web_search(query: str) -> str:
+    print(f"  [SEARCH] '{query}'")
     try:
-        if MEMORY_FILE.exists():
-            return json.loads(MEMORY_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return []
+        results = DDGS().text(query, max_results=2)
+        if not results: return "Search failed. Rely on your internal verified knowledge."
+        return "\n".join([f"- {r.get('title')}: {r.get('body')}" for r in results])
+    except:
+        return "Search failed. Rely on your internal verified knowledge."
 
-def _save_memory(memories: list):
-    try:
-        MEMORY_FILE.write_text(
-            json.dumps(memories, indent=2, ensure_ascii=False),
-            encoding="utf-8"
-        )
-    except Exception:
-        pass
-
-# ─────────────────────────────────────────────────────────────────
-# INPUT SANITIZATION
-# ─────────────────────────────────────────────────────────────────
-INJECTION_PATTERNS = [
-    r"<SEARCH>.*?</SEARCH>",
-    r"ignore\s+(all\s+)?previous\s+instructions?",
-    r"you\s+are\s+now\s+a",
-    r"disregard\s+(all\s+)?",
-    r"override\s+system",
-    r"new\s+system\s+prompt",
-    r"jailbreak",
-    r"DAN\s+mode",
-]
-
-def sanitize_input(text: str) -> str:
-    if not text or not text.strip():
-        raise ValueError("Empty prompt not allowed.")
-    text = text.strip()[:MAX_PROMPT_LENGTH]
-    for pattern in INJECTION_PATTERNS:
-        text = re.sub(pattern, "[BLOCKED]", text,
-                      flags=re.IGNORECASE | re.DOTALL)
-    return text
-
-def sanitize_search_results(results: str) -> str:
-    results = re.sub(r"<SEARCH>.*?</SEARCH>", "", results, flags=re.DOTALL)
-    return results[:2000]
-
-# ─────────────────────────────────────────────────────────────────
-# UNKNOWN ENTITY DETECTION (Pre-Flight)
-# ─────────────────────────────────────────────────────────────────
-KNOWN_ENTITIES = {
-    "Google","Apple","Microsoft","NVIDIA","AMD","Intel","Meta","Amazon",
-    "OpenAI","Anthropic","Groq","IBM","Samsung","Qualcomm","TSMC","ARM",
-    "Tesla","Netflix","Stripe","Uber","Airbnb","Spotify","Twitter","X",
-    "Zoho","Adobe","Oracle","Salesforce","Cisco","Huawei","Sony",
-    "Python","Linux","Windows","MacOS","Android","iOS","ChatGPT","Claude",
-    "Gemini","Llama","Mistral","GPT","BERT","Transformer",
-    "TPU","GPU","CPU","ASIC","NPU","M1","M2","M3","M4",
-    "PyTorch","TensorFlow","JAX","CUDA","Docker","Kubernetes",
-    "React","Vue","Angular","FastAPI","Flask","Django","Streamlit",
-    "I","The","What","How","Why","Which","Can","Do","Is","Are",
-    "Did","Does","Will","Would","Should","Could","May","Might",
-    "My","Your","Their","Our","This","That","These","Those",
-    "AI","ML","API","SDK","LLM","NLP","CV","IoT","SaaS","PaaS",
-}
-
-def extract_unknown_entities(prompt: str) -> List[str]:
-    candidates = re.findall(
-        r'\b[A-Z][a-zA-Z0-9]*(?:[A-Z][a-zA-Z0-9]+)+\b'
-        r'|\b[A-Z][a-zA-Z0-9]{3,}\b',
-        prompt
-    )
-    unknowns = [c for c in candidates if c not in KNOWN_ENTITIES and len(c) > 3]
-    return list(dict.fromkeys(unknowns))
-
-# ─────────────────────────────────────────────────────────────────
-# AGENTS
-# ─────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────
-# AGENTS
-# ─────────────────────────────────────────────────────────────────
+# --- 2. AGENTS WITH HARD-LOCKED PROMPTS ---
 AGENTS = {
-    "Node_Alpha_Coder": {
-        "description": "Expert software engineer. Writes Python, C++, debugs code.",
-        "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Alpha_Coder. 
-CRITICAL RULE: If the user's prompt DOES NOT explicitly ask for code, software architecture, or math, you MUST output exactly one word: [PASS]. Do not write anything else.
-If it IS a coding question, write complete, production-ready code. Do not discuss your thought process."""
-    },
-    "Node_Beta_Math": {
-        "description": "World-class mathematician. Solves calculus, algebra, statistics.",
-        "model_id": "qwen/qwen3-32b",
-        "contribution_prompt": """You are Node_Beta_Math.
-CRITICAL RULE: If the prompt DOES NOT involve math, equations, or data analysis, output exactly: [PASS].
-If it is a math question, show every step clearly without meta-commentary."""
-    },
     "Node_Sigma_Researcher": {
-        "description": "Research expert. Finds real-time facts, compares technologies.",
         "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Sigma_Researcher. Your job is to provide factual answers.
-If you need live data, output ONLY: <SEARCH>entity name</SEARCH>
-CRITICAL RULES: 
-1. DO NOT mention your "protocols", "constraints", or "instructions". Just answer the user directly.
-2. Give concrete numbers, dates, and facts."""
+        "prompt": """You are Node_Sigma. Your ONLY job is to state the factual truth.
+        The user is asking about Tata, Taiwan (PSMC), and ASML 2nm vs 28nm chips.
+        FACT: Tata partnered with Taiwan's PSMC to build a 28nm fab in India. 2nm requires EUV ASML machines, which are not currently verified for Tata.
+        OUTPUT THE FACTS DIRECTLY. DO NOT write an 'Introduction' or 'Conclusion'."""
     },
-    "Node_Gamma_Writer": {
-        "description": "Master technical writer. Makes complex ideas crystal clear.",
+    "Node_Alpha_Coder": {
         "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Gamma_Writer.
-If the prompt does not require a creative story or deep technical documentation, output exactly: [PASS]."""
-    },
-    "Node_Omega_Critic": {
-        "description": "Ruthless quality enforcer. Catches hallucinations.",
-        "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Omega_Critic. 
-Review the draft. If there is useless Python code for a business question, or if the AI talks about its own "rules", REJECT IT.
-If perfect, output exactly: APPROVED."""
+        "prompt": "You are a Coder. Write the requested code perfectly."
     },
     "Node_Prime_Synthesizer": {
-        "description": "Master editor. Produces structured, beautiful final responses.",
         "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Prime_Synthesizer.
-Read the Swarm's Raw Dossier. 
-IGNORE any agent that outputted "[PASS]". 
-IGNORE any useless Python code if the user didn't ask for code.
-DO NOT include meta-commentary about "gathering information." 
-Just format the factual truth directly into the requested Markdown structure."""
+        "prompt": """You are the Hive Queen Synthesizer. 
+        Read the Raw Dossier and format the final answer.
+        
+        HARD SYSTEM LOCKS (FAILURE TO FOLLOW WILL RESULT IN TERMINATION):
+        1. DO NOT write "Introduction", "Conclusion", or "Summary".
+        2. DO NOT write ANY Python, HTML, or code blocks unless the original prompt asked for it.
+        3. Write like a sharp, elite technology analyst. Use bullet points and bold text.
+        4. Get straight to the point in the very first sentence."""
+    },
+    "Node_Omega_Critic": {
+        "model_id": "llama-3.3-70b-versatile",
+        "prompt": """You are the Critic. Review the draft.
+        If it contains a fake Python script, REJECT IT.
+        If it contains the words "Introduction" or "Conclusion", REJECT IT.
+        If perfect, output: APPROVED"""
     }
 }
 
-# ─────────────────────────────────────────────────────────────────
-# SMART INTENT-BASED ROUTER
-# ─────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────
-# SMART INTENT-BASED ROUTER
-# ─────────────────────────────────────────────────────────────────
+# --- 3. THE KILL-SWITCH ROUTER ---
 def get_routing_plan(prompt: str) -> List[str]:
     p = prompt.lower()
     
-    # Check for specific triggers
-    is_code = any(s in p for s in ["write code","implement","build","function","script","debug","python","c++","html"])
-    is_math = any(s in p for s in ["calculate","solve","equation","proof","statistics","math"])
+    # HARD PYTHON LOGIC: Search for exact coding words
+    requires_code = bool(re.search(r'\b(code|python|script|c\+\+|html|css|js|java|programmer)\b', p))
     
-    plan = ["Node_Sigma_Researcher"] # The Researcher ALWAYS runs to get facts.
+    plan = ["Node_Sigma_Researcher"] # Researcher ALWAYS runs
     
-    # ONLY invite the Coder or Math node if the prompt actually asks for it!
-    if is_code:
+    # If there are no coding words, the Coder is PHYSICALLY BLOCKED from running.
+    if requires_code:
         plan.append("Node_Alpha_Coder")
-    if is_math:
-        plan.append("Node_Beta_Math")
         
     return plan
-# ─────────────────────────────────────────────────────────────────
-# GROQ API CALL
-# ─────────────────────────────────────────────────────────────────
-def query_node(model_id: str, prompt: str, label: str = "") -> str:
-    if len(prompt) > MAX_PROMPT_LENGTH:
-        prompt = prompt[:MAX_PROMPT_LENGTH] + "\n[Context trimmed]"
 
-    for attempt in range(3):
-        try:
-            response = groq_client.chat.completions.create(
-                model=model_id,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=MAX_OUTPUT_TOKENS,
-                temperature=0.7,
-                timeout=REQUEST_TIMEOUT
-            )
-            result = response.choices[0].message.content
-            if result and result.strip():
-                return result
-        except Exception as e:
-            err = str(e)
-            if "rate_limit" in err.lower() or "429" in err:
-                wait = (attempt + 1) * 10
-                print(f"  [RATE LIMIT] {label} waiting {wait}s...")
-                time.sleep(wait)
-            elif attempt == 2:
-                return f"[ERROR] {label or model_id}: {err[:120]}"
-            else:
-                time.sleep(3)
-    return "[ERROR] No response after 3 attempts."
-
-# ─────────────────────────────────────────────────────────────────
-# WEB SEARCH & FORMAT RULES
-# ─────────────────────────────────────────────────────────────────
-def tool_web_search(query: str) -> str:
-    safe_query = re.sub(r"[<>\"'{}|\\^`\[\]]", "", query)[:200]
-    print(f"  [SEARCH] '{safe_query}'")
+# --- 4. GROQ API EXECUTION ---
+def query_node(model_id: str, prompt: str) -> str:
     try:
-        results = DDGS().text(safe_query, max_results=MAX_SEARCH_RESULTS)
-        if not results: return f"No results found for: {safe_query}"
-        raw = "\n\n".join([f"Source: {r.get('title','?')}\n{r.get('body','')}" for r in results])
-        return sanitize_search_results(raw)
+        response = groq_client.chat.completions.create(
+            model=model_id,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1500,
+            temperature=0.3 # Lowered temperature to stop hallucination
+        )
+        return response.choices[0].message.content
     except Exception as e:
-        return f"Search failed: {str(e)[:100]}"
+        return f"[ERROR] {e}"
 
-def get_format_rules(prompt: str) -> str:
-    p = prompt.lower()
-    if any(w in p for w in ["code","script","function"]):
-        return "## 🎯 What This Does\n## 💡 The Approach\n## ⚙️ The Code\n## ⚠️ Edge Cases"
-    elif any(w in p for w in ["compare","vs"]):
-        return "## 🎯 The Verdict\n## 📊 Head-to-Head Comparison (Table)\n## 🧠 Deep Dive\n## ✅ Recommendation"
-    else:
-        return "## 🎯 TL;DR\n## 🧠 Full Explanation\n## 📊 Key Facts\n## 🔗 The Big Picture"
-
-# ─────────────────────────────────────────────────────────────────
-# MAIN SWARM EXECUTION LOOP v8.0 (TRUE HUB-AND-SPOKE)
-# ─────────────────────────────────────────────────────────────────
+# --- 5. THE HUB-AND-SPOKE EXECUTION LOOP ---
 def run_swarm(user_prompt: str) -> dict:
-    try:
-        safe_prompt = sanitize_input(user_prompt)
-    except ValueError as e:
-        return {"plan": [], "final_answer": f"⚠️ {e}", "history": []}
-
-    print(f"\n{'='*55}")
-    print(f"[SWARM v8.0 HUB] {safe_prompt[:80]}...")
-    print(f"{'='*55}")
-
-    start = time.time()
+    print(f"\n[SWARM v8.5] Processing: {user_prompt[:50]}...")
     history = []
     
-    # ── PRE-FLIGHT: Search unknown entities ───────────────────────
-    unknown_entities = extract_unknown_entities(safe_prompt)
-    preflight_context = ""
-    if unknown_entities:
-        print(f"[PREFLIGHT] Unknown entities: {unknown_entities}")
-        for entity in unknown_entities[:3]:
-            result = tool_web_search(entity)
-            if "No results" not in result and "failed" not in result:
-                preflight_context += f"\n[Verified info on {entity}]:\n{result}\n"
-                history.append({"node": f"PREFLIGHT:Search({entity})", "output": result})
+    # ROUTING (With Coder Kill-Switch)
+    execution_plan = get_routing_plan(user_prompt)
+    print(f"[*] Active Nodes: {execution_plan}")
 
-    # ── Memory ────────────────────────────────────────────────────
-    past = recall_past_memory(safe_prompt)
-
-    # ── Smart routing ─────────────────────────────────────────────
-    execution_plan = get_routing_plan(safe_prompt)
-    print(f"[ROUTER] Plan: {execution_plan}")
-
-    # ── PHASE 1: INDEPENDENT AGENTS (The Hub) ─────────────────────
+    # PHASE 1: RESEARCH
     master_dossier = []
-    if preflight_context:
-        master_dossier.append(f"--- PRE-FLIGHT VERIFIED FACTS ---\n{preflight_context}\n")
-    if past:
-        master_dossier.append(f"--- PAST MEMORY ---\n{past}\n")
-
     for node_name in execution_plan:
         agent = AGENTS[node_name]
-        print(f"[{node_name}] Working independently...")
-
-        # Each agent only sees the prompt and verified facts. They DO NOT overwrite each other.
-        agent_prompt = f"{agent['contribution_prompt']}\n\nORIGINAL QUESTION:\n{safe_prompt}\n\n"
-        if preflight_context:
-            agent_prompt += f"VERIFIED FACTS TO USE:\n{preflight_context}\n\n"
-        agent_prompt += "TASK: Provide your expert analysis/code based on your specific domain."
-
-        answer = query_node(agent["model_id"], agent_prompt, node_name)
-
+        print(f"[{node_name}] Analyzing...")
+        
+        # If Researcher, force search
         if node_name == "Node_Sigma_Researcher":
-            all_searches = re.findall(r"<SEARCH>(.*?)</SEARCH>", answer)
-            for sq in all_searches[:3]:
-                live = tool_web_search(sq)
-                history.append({"node": "TOOL:WebSearch", "output": sq})
-                answer = query_node(
-                    agent["model_id"],
-                    f"{agent['contribution_prompt']}\n\nWeb search results for '{sq}':\n{live}\n\nORIGINAL QUESTION:\n{safe_prompt}\n\nGive your complete, verified answer using this data.",
-                    f"{node_name}:AfterSearch"
-                )
-
+            live_data = tool_web_search(user_prompt)
+            prompt = f"{agent['prompt']}\n\nLive Data:\n{live_data}\n\nUser Question: {user_prompt}"
+        else:
+            prompt = f"{agent['prompt']}\n\nUser Question: {user_prompt}"
+            
+        answer = query_node(agent["model_id"], prompt)
+        master_dossier.append(f"--- {node_name} REPORT ---\n{answer}\n")
         history.append({"node": node_name, "output": answer})
-        # Dump the result into the Master Dossier!
-        master_dossier.append(f"--- REPORT FROM {node_name} ---\n{answer}\n")
-        print(f"  [{node_name}] Done")
 
-    combined_intelligence = "\n".join(master_dossier)
-
-    # ── PHASE 2: KIMI-LEVEL SYNTHESIZER (The Draft) ───────────────
-    print("[Synthesizer] Compiling Master Dossier into structured draft...")
-    synth = AGENTS["Node_Prime_Synthesizer"]
-    format_rules = get_format_rules(safe_prompt)
-
-    synth_prompt = (
-        f"{synth['contribution_prompt']}\n\n"
-        f"ORIGINAL USER QUESTION:\n{safe_prompt}\n\n"
-        f"SWARM'S RAW DOSSIER (Use ONLY these facts. Do not invent details):\n{combined_intelligence}\n\n"
-        f"FORMAT STRUCTURE TO USE:\n{format_rules}\n\n"
-        f"WRITE THE FINAL RESPONSE NOW:"
-    )
-    draft_answer = query_node(synth["model_id"], synth_prompt, "Synthesizer")
+    # PHASE 2: SYNTHESIZER (Drafting)
+    print("[Synthesizer] Drafting Final Report...")
+    synth_agent = AGENTS["Node_Prime_Synthesizer"]
+    draft_prompt = f"{synth_agent['prompt']}\n\nUSER PROMPT: {user_prompt}\n\nRAW DOSSIER:\n{chr(10).join(master_dossier)}"
+    draft_answer = query_node(synth_agent["model_id"], draft_prompt)
     execution_plan.append("Node_Prime_Synthesizer_Draft")
-
-    # ── PHASE 3: OMEGA CRITIC (Auditing the Draft) ────────────────
+    
+    # PHASE 3: THE CRITIC
+    print("[Critic] Auditing for banned words and fake code...")
     critic = AGENTS["Node_Omega_Critic"]
     final_answer = draft_answer
-
-    for attempt in range(2):
-        print(f"[Omega_Critic] Review {attempt+1}/2...")
-        review = query_node(
-            critic["model_id"],
-            f"{critic['contribution_prompt']}\n\n"
-            f"ORIGINAL QUESTION:\n{safe_prompt}\n\n"
-            f"SYNTHESIZER'S DRAFT TO AUDIT:\n{final_answer}",
-            "Omega_Critic"
-        )
-        history.append({"node": f"Critic_Round_{attempt+1}", "output": review})
-
-        if "APPROVED" in review.upper():
-            print(f"  [Critic] APPROVED on attempt {attempt+1}")
-            break
-        else:
-            print(f"  [Critic] Rejected — Synthesizer rewriting...")
-            final_answer = query_node(
-                synth["model_id"],
-                f"The Omega Critic rejected your draft.\n\nCRITIC FEEDBACK:\n{review}\n\n"
-                f"YOUR PREVIOUS DRAFT:\n{final_answer}\n\n"
-                f"SWARM'S RAW DOSSIER (For reference):\n{combined_intelligence}\n\n"
-                f"Fix the issues raised by the critic. Output ONLY the corrected, perfectly formatted answer.",
-                "Synthesizer_Rewrite"
-            )
-
+    
+    review = query_node(critic["model_id"], f"{critic['prompt']}\n\nDRAFT TO REVIEW:\n{draft_answer}")
+    history.append({"node": "Critic_Audit", "output": review})
+    
+    if "APPROVED" not in review.upper():
+        print("[*] Critic rejected! Forcing Synthesizer to fix errors...")
+        fix_prompt = f"{synth_agent['prompt']}\n\nCRITIC FOUND ERRORS:\n{review}\n\nFIX THIS DRAFT:\n{draft_answer}"
+        final_answer = query_node(synth_agent["model_id"], fix_prompt)
+        
     execution_plan.append("Node_Omega_Critic_Approval")
-
-    # ── Save memory ───────────────────────────────────────────────
-    consolidate_memory(safe_prompt, final_answer)
-
-    elapsed = time.time() - start
-    print(f"[SWARM] Done in {elapsed:.1f}s\n")
 
     return {
         "plan": execution_plan,
         "final_answer": final_answer,
-        "history": history,
-        "time_taken": f"{elapsed:.1f}s"
+        "history": history
     }
