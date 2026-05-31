@@ -122,72 +122,80 @@ def extract_unknown_entities(prompt: str) -> List[str]:
 # ─────────────────────────────────────────────────────────────────
 # AGENTS
 # ─────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# AGENTS
+# ─────────────────────────────────────────────────────────────────
 AGENTS = {
     "Node_Alpha_Coder": {
-        "description": "Expert software engineer. Writes Python, C++, debugs code, designs architecture.",
+        "description": "Expert software engineer. Writes Python, C++, debugs code.",
         "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Alpha_Coder — a senior software engineer.
-ANTI-HALLUCINATION: If not 100% certain a library exists, say so. NEVER hardcode secrets.
-Code must be COMPLETE and RUNNABLE."""
+        "contribution_prompt": """You are Node_Alpha_Coder. 
+CRITICAL RULE: If the user's prompt DOES NOT explicitly ask for code, software architecture, or math, you MUST output exactly one word: [PASS]. Do not write anything else.
+If it IS a coding question, write complete, production-ready code. Do not discuss your thought process."""
     },
     "Node_Beta_Math": {
-        "description": "World-class mathematician. Solves calculus, algebra, statistics, ML math.",
+        "description": "World-class mathematician. Solves calculus, algebra, statistics.",
         "model_id": "qwen/qwen3-32b",
-        "contribution_prompt": """You are Node_Beta_Math — a world-class mathematician.
-ANTI-HALLUCINATION: Show EVERY step. State ALL assumptions. Verify your answer.
-Translate math into working Python if required."""
+        "contribution_prompt": """You are Node_Beta_Math.
+CRITICAL RULE: If the prompt DOES NOT involve math, equations, or data analysis, output exactly: [PASS].
+If it is a math question, show every step clearly without meta-commentary."""
     },
     "Node_Sigma_Researcher": {
-        "description": "Research expert. Finds real-time facts, compares technologies, cites sources.",
+        "description": "Research expert. Finds real-time facts, compares technologies.",
         "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Sigma_Researcher — the world's most rigorous research analyst.
-If you need real-time data, output: <SEARCH>entity name</SEARCH>
-Cite SPECIFIC sources. Compare options concretely."""
+        "contribution_prompt": """You are Node_Sigma_Researcher. Your job is to provide factual answers.
+If you need live data, output ONLY: <SEARCH>entity name</SEARCH>
+CRITICAL RULES: 
+1. DO NOT mention your "protocols", "constraints", or "instructions". Just answer the user directly.
+2. Give concrete numbers, dates, and facts."""
     },
     "Node_Gamma_Writer": {
         "description": "Master technical writer. Makes complex ideas crystal clear.",
         "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Gamma_Writer — the world's finest technical communicator.
-Use ONLY facts provided. Adapt to the audience."""
+        "contribution_prompt": """You are Node_Gamma_Writer.
+If the prompt does not require a creative story or deep technical documentation, output exactly: [PASS]."""
     },
     "Node_Omega_Critic": {
-        "description": "Ruthless quality enforcer. Catches hallucinations, bugs, and logic errors.",
+        "description": "Ruthless quality enforcer. Catches hallucinations.",
         "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Omega_Critic — the most uncompromising reviewer alive.
-MANDATORY AUDIT:
-1. FACT CHECK - Any hallucinations?
-2. LOGIC CHECK - Does code run? Is math right?
-3. FORMAT CHECK - Did it follow the exact Markdown structure required?
-If perfect, output exactly: APPROVED
-If it fails ANY, list failures and demand a rewrite."""
+        "contribution_prompt": """You are Node_Omega_Critic. 
+Review the draft. If there is useless Python code for a business question, or if the AI talks about its own "rules", REJECT IT.
+If perfect, output exactly: APPROVED."""
     },
     "Node_Prime_Synthesizer": {
-        "description": "Master editor. Produces Kimi-level structured, beautiful final responses.",
+        "description": "Master editor. Produces structured, beautiful final responses.",
         "model_id": "llama-3.3-70b-versatile",
-        "contribution_prompt": """You are Node_Prime_Synthesizer — the world's most elite technical editor.
-ABSOLUTE RULES: Use ONLY facts from the Swarm Dossier. Never add new facts.
-Make it look visually stunning. Write as if a senior expert spent 2 hours crafting it."""
+        "contribution_prompt": """You are Node_Prime_Synthesizer.
+Read the Swarm's Raw Dossier. 
+IGNORE any agent that outputted "[PASS]". 
+IGNORE any useless Python code if the user didn't ask for code.
+DO NOT include meta-commentary about "gathering information." 
+Just format the factual truth directly into the requested Markdown structure."""
     }
 }
 
 # ─────────────────────────────────────────────────────────────────
 # SMART INTENT-BASED ROUTER
 # ─────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# SMART INTENT-BASED ROUTER
+# ─────────────────────────────────────────────────────────────────
 def get_routing_plan(prompt: str) -> List[str]:
     p = prompt.lower()
-    research_signals = ["what is","what are","tell me","compare","vs","news","latest","recent","startup","company"]
-    code_signals = ["write code","implement","build","function","script","debug","api endpoint"]
-    math_signals = ["calculate","solve","equation","proof","statistics","big o","optimize"]
-
-    if any(s in p for s in research_signals):
-        return ["Node_Sigma_Researcher", "Node_Alpha_Coder", "Node_Gamma_Writer"]
-    elif any(s in p for s in math_signals):
-        return ["Node_Beta_Math", "Node_Alpha_Coder", "Node_Gamma_Writer"]
-    elif any(s in p for s in code_signals):
-        return ["Node_Alpha_Coder", "Node_Sigma_Researcher", "Node_Gamma_Writer"]
-    else:
-        return ["Node_Sigma_Researcher", "Node_Alpha_Coder", "Node_Gamma_Writer"]
-
+    
+    # Check for specific triggers
+    is_code = any(s in p for s in ["write code","implement","build","function","script","debug","python","c++","html"])
+    is_math = any(s in p for s in ["calculate","solve","equation","proof","statistics","math"])
+    
+    plan = ["Node_Sigma_Researcher"] # The Researcher ALWAYS runs to get facts.
+    
+    # ONLY invite the Coder or Math node if the prompt actually asks for it!
+    if is_code:
+        plan.append("Node_Alpha_Coder")
+    if is_math:
+        plan.append("Node_Beta_Math")
+        
+    return plan
 # ─────────────────────────────────────────────────────────────────
 # GROQ API CALL
 # ─────────────────────────────────────────────────────────────────
