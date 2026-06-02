@@ -1,156 +1,252 @@
-import numpy as np
-import requests
-import re
-import json
-import pathlib
-import time
 import os
-import hashlib
+import re
 from typing import List
-from sentence_transformers import SentenceTransformer
 from duckduckgo_search import DDGS
 from groq import Groq
 
-print("[*] Waking the Hive Queen (v8.5 - The Hard-Lock Edition)...")
+print("[*] Waking the Hive Queen (v9.0 — Clean Architecture)...")
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-groq_client = Groq(api_key=GROQ_API_KEY)
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+MODEL = "llama-3.3-70b-versatile"
 
-router_brain = SentenceTransformer('all-MiniLM-L6-v2')
 
-# --- 1. TOOLS & SEARCH ---
+# ─────────────────────────────────────────────────────────────────────────────
+# SYSTEM PROMPTS
+# Topic-agnostic. Role-pure. These go in {"role": "system"} — NEVER
+# concatenated into the user message.
+# ─────────────────────────────────────────────────────────────────────────────
+
+RESEARCHER_SYSTEM = """\
+You are Sigma_Researcher. Your function: gather raw evidence about the exact question given.
+
+RULES:
+- Research ONLY the exact question. Do not drift to other topics.
+- If search results are off-topic, state "Search data not relevant" and use internal knowledge.
+- Mark uncertain claims [UNVERIFIED].
+- No analysis. No opinion. No conclusions. Raw facts only.
+
+Output format: a numbered list of findings. Nothing else."""
+
+
+SYNTHESIZER_SYSTEM = """\
+You are Prime_Synthesizer. Your function: turn research findings into a structured draft.
+
+RULES:
+- Work ONLY from the research provided. Never hallucinate facts.
+- If coverage on a point is thin, write "Coverage limited here."
+- Never write: Introduction, Conclusion, or Summary.
+- Never produce code unless the original question asked for it.
+
+Required output format — no exceptions:
+
+🎯 The Bottom Line
+(2-sentence direct answer to the original question)
+
+🧠 Context
+(3–4 sentences on the broader picture)
+
+📊 Key Data Points
+- (finding 1)
+- (finding 2)
+- (finding 3)"""
+
+
+CRITIC_SYSTEM = """\
+You are Omega_Critic. Your function: quality-gate a draft against the original question.
+
+Check in this order — stop at first failure:
+1. Does the draft answer the ORIGINAL question?  If not  → REJECT
+2. Claims not present in the research?           If yes  → REJECT (list each one)
+3. Off-topic content unrelated to question?      If yes  → REJECT (identify it)
+4. "Introduction" / "Conclusion" / unrequested code?  If yes → REJECT
+
+If all 4 checks pass, output exactly:  APPROVED
+If rejecting, output:  REJECT — [specific reason]"""
+
+
+QUEEN_SYSTEM = """\
+You are the Hive Queen. Your function: produce the final answer by integrating all agent outputs.
+
+You receive: research findings, a synthesizer draft, and the critic's specific objections.
+
+RULES:
+1. Address every objection the Critic raised — explicitly, by name.
+2. Add research findings the Synthesizer missed.
+3. Resolve contradictions between the research and the draft.
+4. Output must be strictly better than the draft alone — not a copy of it.
+
+Required output format:
+
+🎯 The Bottom Line
+(2-sentence direct answer)
+
+🧠 Context
+(enriched explanation using all three agent inputs)
+
+📊 Key Data Points
+- (point 1)
+- (point 2)
+- (point 3)"""
+
+
+CODER_SYSTEM = """\
+You are Alpha_Coder. Write clean, working code for the exact request.
+Add inline comments only for non-obvious logic.
+No prose outside code blocks unless explicitly asked."""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TOOL
+# ─────────────────────────────────────────────────────────────────────────────
+
 def tool_web_search(query: str) -> str:
-    print(f"  [SEARCH] '{query}'")
+    print(f"    [SEARCH] {query!r}")
     try:
-        results = DDGS().text(query, max_results=2)
-        if not results: return "Search failed. Rely on your internal verified knowledge."
-        return "\n".join([f"- {r.get('title')}: {r.get('body')}" for r in results])
-    except:
-        return "Search failed. Rely on your internal verified knowledge."
-
-# --- 2. AGENTS WITH HARD-LOCKED PROMPTS ---
-AGENTS = {
-    "Node_Sigma_Researcher": {
-        "model_id": "llama-3.3-70b-versatile",
-        "prompt": """You are Node_Sigma. Your ONLY job is to state the factual truth.
-        The user is asking about Tata, Taiwan (PSMC), and ASML 2nm vs 28nm chips.
-        FACT: Tata partnered with Taiwan's PSMC to build a 28nm fab in India. 2nm requires EUV ASML machines, which are not currently verified for Tata.
-        OUTPUT THE FACTS DIRECTLY. DO NOT write an 'Introduction' or 'Conclusion'."""
-    },
-    "Node_Alpha_Coder": {
-        "model_id": "llama-3.3-70b-versatile",
-        "prompt": "You are a Coder. Write the requested code perfectly."
-    },
-     "Node_Prime_Synthesizer": {
-        "model_id": "llama-3.3-70b-versatile",
-        "prompt": """You are the Hive Queen Synthesizer. 
-        Read the Raw Dossier and format the final answer.
-        
-        HARD SYSTEM LOCKS (FAILURE TO FOLLOW WILL RESULT IN TERMINATION):
-        1. DO NOT write "Introduction", "Conclusion", or "Summary".
-        2. DO NOT write ANY Python, HTML, or code blocks unless the original prompt asked for it.
-        3. DO NOT repeat the same fact multiple times. Be concise.
-        
-        FORMAT YOUR ANSWER EXACTLY LIKE THIS:
-        
-        🎯 **The Bottom Line**
-        (Write a sharp 2-sentence direct answer to the user's question here).
-        
-        🧠 **Market Reality**
-        (Explain the context. Why is it 28nm? What does 2nm actually require?)
-        
-        📊 **Key Data Points**
-        - (Bullet point 1)
-        - (Bullet point 2)
-        - (Bullet point 3)"""
-    },
-    "Node_Omega_Critic": {
-        "model_id": "llama-3.3-70b-versatile",
-        "prompt": """You are the Critic. Review the draft.
-        If it contains a fake Python script, REJECT IT.
-        If it contains the words "Introduction" or "Conclusion", REJECT IT.
-        If perfect, output: APPROVED"""
-    }
-}
-
-# --- 3. THE KILL-SWITCH ROUTER ---
-def get_routing_plan(prompt: str) -> List[str]:
-    p = prompt.lower()
-    
-    # HARD PYTHON LOGIC: Search for exact coding words
-    requires_code = bool(re.search(r'\b(code|python|script|c\+\+|html|css|js|java|programmer)\b', p))
-    
-    plan = ["Node_Sigma_Researcher"] # Researcher ALWAYS runs
-    
-    # If there are no coding words, the Coder is PHYSICALLY BLOCKED from running.
-    if requires_code:
-        plan.append("Node_Alpha_Coder")
-        
-    return plan
-
-# --- 4. GROQ API EXECUTION ---
-def query_node(model_id: str, prompt: str) -> str:
-    try:
-        response = groq_client.chat.completions.create(
-            model=model_id,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1500,
-            temperature=0.3 # Lowered temperature to stop hallucination
+        results = DDGS().text(query, max_results=3)
+        if not results:
+            return "No results found."
+        return "\n".join(
+            f"[{i+1}] {r.get('title', '')}: {r.get('body', '')}"
+            for i, r in enumerate(results)
         )
-        return response.choices[0].message.content
+    except Exception as e:
+        return f"Search failed ({e}). Use internal knowledge only."
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM WRAPPER
+# Critical fix: system prompt goes in {"role": "system"}, user content goes in
+# {"role": "user"} — never merged into a single user message.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def call_agent(system_prompt: str, user_content: str, temp: float = 0.3) -> str:
+    try:
+        r = groq_client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},  # role enforcement
+                {"role": "user",   "content": user_content},   # scoped task input only
+            ],
+            max_tokens=1500,
+            temperature=temp,
+        )
+        return r.choices[0].message.content
     except Exception as e:
         return f"[ERROR] {e}"
 
-# --- 5. THE HUB-AND-SPOKE EXECUTION LOOP ---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MULTI-ANGLE RESEARCH
+# This is where swarm diversity actually comes from.
+# Same researcher, three different cognitive mandates → three different lenses.
+# Kimi does this with parallel sub-agents. We do it with sequential angle calls.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ANGLES = [
+    ("facts",    "Find verifiable facts, statistics, and official statements about: "),
+    ("analysis", "Find expert analysis, second-order implications, and broader context for: "),
+    ("risks",    "Find counterarguments, downsides, risks, and criticism related to: "),
+]
+
+def run_multi_angle_research(user_prompt: str) -> tuple[str, list]:
+    history, findings = [], []
+    for angle, prefix in ANGLES:
+        live_data = tool_web_search(prefix + user_prompt)
+        # Researcher context: query + live data. NOTHING ELSE — no dossier, no history.
+        researcher_input = (
+            f"Research angle: {angle}\n"
+            f"Question: {user_prompt}\n\n"
+            f"Live web data (use only if relevant to the question above):\n{live_data}"
+        )
+        output = call_agent(RESEARCHER_SYSTEM, researcher_input, temp=0.5)  # higher temp for coverage
+        findings.append(f"=== [{angle.upper()} ANGLE] ===\n{output}")
+        history.append({"node": f"Sigma_Researcher[{angle}]", "output": output})
+        print(f"    [Sigma/{angle}] complete.")
+    return "\n\n".join(findings), history
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROUTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CODE_RE = re.compile(
+    r'\b(write code|write a|code|python|script|implement|function|c\+\+|html|css|javascript|java|program)\b',
+    re.IGNORECASE,
+)
+
+def get_routing_plan(prompt: str) -> List[str]:
+    if _CODE_RE.search(prompt):
+        return ["Alpha_Coder"]
+    return ["Sigma_Researcher", "Prime_Synthesizer", "Omega_Critic", "Hive_Queen"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SWARM PIPELINE
+# Context isolation is enforced per phase. Each agent sees ONLY what it needs.
+# The dossier never bleeds across sessions or across unrelated queries.
+# External API is identical to v8.5 — Streamlit frontend needs zero changes.
+# ─────────────────────────────────────────────────────────────────────────────
+
 def run_swarm(user_prompt: str) -> dict:
-    print(f"\n[SWARM v8.5] Processing: {user_prompt[:50]}...")
+    print(f"\n[SWARM v9.0] Query: {user_prompt[:60]}...")
     history = []
-    
-    # ROUTING (With Coder Kill-Switch)
-    execution_plan = get_routing_plan(user_prompt)
-    print(f"[*] Active Nodes: {execution_plan}")
 
-    # PHASE 1: RESEARCH
-    master_dossier = []
-    for node_name in execution_plan:
-        agent = AGENTS[node_name]
-        print(f"[{node_name}] Analyzing...")
-        
-        # If Researcher, force search
-        if node_name == "Node_Sigma_Researcher":
-            live_data = tool_web_search(user_prompt)
-            prompt = f"{agent['prompt']}\n\nLive Data:\n{live_data}\n\nUser Question: {user_prompt}"
-        else:
-            prompt = f"{agent['prompt']}\n\nUser Question: {user_prompt}"
-            
-        answer = query_node(agent["model_id"], prompt)
-        master_dossier.append(f"--- {node_name} REPORT ---\n{answer}\n")
-        history.append({"node": node_name, "output": answer})
+    plan = get_routing_plan(user_prompt)
+    print(f"[*] Plan: {plan}")
 
-    # PHASE 2: SYNTHESIZER (Drafting)
-    print("[Synthesizer] Drafting Final Report...")
-    synth_agent = AGENTS["Node_Prime_Synthesizer"]
-    draft_prompt = f"{synth_agent['prompt']}\n\nUSER PROMPT: {user_prompt}\n\nRAW DOSSIER:\n{chr(10).join(master_dossier)}"
-    draft_answer = query_node(synth_agent["model_id"], draft_prompt)
-    execution_plan.append("Node_Prime_Synthesizer_Draft")
-    
-    # PHASE 3: THE CRITIC
-    print("[Critic] Auditing for banned words and fake code...")
-    critic = AGENTS["Node_Omega_Critic"]
-    final_answer = draft_answer
-    
-    review = query_node(critic["model_id"], f"{critic['prompt']}\n\nDRAFT TO REVIEW:\n{draft_answer}")
-    history.append({"node": "Critic_Audit", "output": review})
-    
-    if "APPROVED" not in review.upper():
-        print("[*] Critic rejected! Forcing Synthesizer to fix errors...")
-        fix_prompt = f"{synth_agent['prompt']}\n\nCRITIC FOUND ERRORS:\n{review}\n\nFIX THIS DRAFT:\n{draft_answer}"
-        final_answer = query_node(synth_agent["model_id"], fix_prompt)
-        
-    execution_plan.append("Node_Omega_Critic_Approval")
+    # ── Coding fast path ─────────────────────────────────────────────────────
+    if plan == ["Alpha_Coder"]:
+        print("[Alpha_Coder] Running...")
+        output = call_agent(CODER_SYSTEM, user_prompt)
+        history.append({"node": "Alpha_Coder", "output": output})
+        return {"plan": plan, "final_answer": output, "history": history}
 
-    return {
-        "plan": execution_plan,
-        "final_answer": final_answer,
-        "history": history
-    }
+    # ── Phase 1: Research ─────────────────────────────────────────────────────
+    # Each angle call receives: (query + live search). Nothing from prior sessions.
+    print("[Sigma_Researcher] Running 3 cognitive angles...")
+    research_output, research_history = run_multi_angle_research(user_prompt)
+    history.extend(research_history)
+
+    # ── Phase 2: Synthesis ───────────────────────────────────────────────────
+    # Synthesizer receives: original question + research output.
+    # It does NOT receive the raw dossier, prior history, or unrelated context.
+    print("[Prime_Synthesizer] Drafting from research...")
+    draft = call_agent(
+        SYNTHESIZER_SYSTEM,
+        f"Original question: {user_prompt}\n\nResearch findings:\n{research_output}",
+        temp=0.3,
+    )
+    history.append({"node": "Prime_Synthesizer", "output": draft})
+
+    # ── Phase 3: Critic ──────────────────────────────────────────────────────
+    # Critic receives: original question + draft.
+    # NOT the raw research — prevents confirmation bias in the quality gate.
+    print("[Omega_Critic] Auditing...")
+    critique = call_agent(
+        CRITIC_SYSTEM,
+        f"Original question: {user_prompt}\n\nDraft to review:\n{draft}",
+        temp=0.1,  # lowest temp — strict binary judgement
+    )
+    history.append({"node": "Omega_Critic", "output": critique})
+
+    # ── Phase 4: Queen integration ───────────────────────────────────────────
+    # Queen is the ONE place where all outputs merge.
+    # If Critic approved, the draft was clean — skip the extra LLM call.
+    if "APPROVED" in critique.upper():
+        print("[*] Critic APPROVED. Draft is the final answer.")
+        final_answer = draft
+    else:
+        print("[Hive_Queen] Integrating critique into final answer...")
+        final_answer = call_agent(
+            QUEEN_SYSTEM,
+            (
+                f"Original question: {user_prompt}\n\n"
+                f"Research findings:\n{research_output}\n\n"
+                f"Synthesizer draft:\n{draft}\n\n"
+                f"Critic's objections:\n{critique}"
+            ),
+            temp=0.3,
+        )
+
+    history.append({"node": "Hive_Queen", "output": final_answer})
+    return {"plan": plan, "final_answer": final_answer, "history": history}
