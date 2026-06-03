@@ -2,7 +2,7 @@
 
 > *"The collective intelligence emerges from the unity of independent minds."*
 
-A distributed artificial intelligence framework inspired by biological swarm intelligence and hive collective consciousness. SwarmAI orchestrates multiple AI agents as a coordinated swarm, enabling emergent intelligence through decentralized collaboration.
+A distributed artificial intelligence framework inspired by biological swarm intelligence and hive collective consciousness. SwarmAI orchestrates multiple AI agents as a coordinated swarm, enabling[...]
 
 🔗 **Live Demo**: https://swarmai-7znybrr5khwjozqxabefcn.streamlit.app/
 
@@ -10,7 +10,7 @@ A distributed artificial intelligence framework inspired by biological swarm int
 
 ## 🌐 Overview
 
-SwarmAI is an advanced multi-agent AI system that models collective intelligence through swarm mechanics. Each agent operates autonomously while contributing to a unified hive objective through stigmergy and pheromone-inspired communication protocols.
+SwarmAI is an advanced multi-agent AI system that models collective intelligence through swarm mechanics. Each agent operates autonomously while contributing to a unified hive objective through st[...]
 
 ### Core Principles
 
@@ -121,33 +121,6 @@ print(f"Confidence: {results.confidence}%")
 
 ---
 
-## 📚 Documentation
-
-### Getting Started
-- [Installation Guide](./docs/installation.md)
-- [Configuration](./docs/configuration.md)
-- [First Swarm](./docs/first_swarm.md)
-
-### Core Concepts
-- [Hive Architecture](./docs/architecture.md)
-- [Agent Roles & Specializations](./docs/agent_roles.md)
-- [Communication Protocols](./docs/communication.md)
-- [Task Management](./docs/task_management.md)
-
-### Advanced Topics
-- [Custom Agent Development](./docs/custom_agents.md)
-- [Performance Tuning](./docs/performance.md)
-- [Swarm Emergent Behaviors](./docs/emergence.md)
-- [Multi-Hive Coordination](./docs/multi_hive.md)
-
-### API Reference
-- [Hive API](./docs/api/hive.md)
-- [Agent API](./docs/api/agent.md)
-- [Task API](./docs/api/task.md)
-- [Events API](./docs/api/events.md)
-
----
-
 ## 💡 Use Cases
 
 ### 🔍 Research & Analysis
@@ -240,7 +213,6 @@ SwarmAI is inspired by:
 
 - **Issues**: [Report bugs or request features](https://github.com/octaboomai/SwarmAI/issues)
 - **Discussions**: [Join community discussions](https://github.com/octaboomai/SwarmAI/discussions)
-- **Documentation**: [Full docs](./docs)
 
 ---
 
