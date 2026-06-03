@@ -1,2 +1,2 @@
 # SwarmAI
-https://swarmai-qmywysvgj3b6pyrsswytss.streamlit.app/
+https://swarmai-7znybrr5khwjozqxabefcn.streamlit.app/
