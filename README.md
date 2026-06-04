@@ -25,7 +25,7 @@ SwarmAI is an advanced multi-agent AI system that models collective intelligence
 ## ✨ Features
 
 ### Swarm Architecture
-- **Multi-Agent Framework**: Deploy unlimited AI agents in coordinated swarms
+- **Multi Agent Framework**: Deploy unlimited AI agents in coordinated swarms
 - **Hive Queen Coordination**: Central intelligence without centralized control
 - **Dynamic Task Distribution**: Intelligent load balancing across agents
 - **Pheromone Trails**: Virtual markers for indirect communication and memory
@@ -37,7 +37,7 @@ SwarmAI is an advanced multi-agent AI system that models collective intelligence
 - **Real-time Monitoring**: Track swarm health, performance, and synchronization
 
 ### Integration & Deployment
-- **Multi-LLM Support**: Work with GPT, Claude, Gemini, Llama, and custom models
+- **LLM Support**: Work with Llama models
 - **API-First Design**: RESTful interfaces for seamless integration
 - **Event-Driven Architecture**: React to environmental changes in real-time
 - **Scalable Infrastructure**: From laptop swarms to cloud-distributed systems
