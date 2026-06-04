@@ -1,10 +1,12 @@
 import os
 import re
+import time
 from typing import List
+
 from duckduckgo_search import DDGS
 from groq import Groq
 
-print("[*] Waking the Hive Queen (v9.0 — Clean Architecture)...")
+print("[*] Waking the Hive Queen (v9.1 — Fixed Architecture)...")
 
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 MODEL = "llama-3.3-70b-versatile"
@@ -12,30 +14,31 @@ MODEL = "llama-3.3-70b-versatile"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM PROMPTS
-# Topic-agnostic. Role-pure. These go in {"role": "system"} — NEVER
-# concatenated into the user message.
 # ─────────────────────────────────────────────────────────────────────────────
 
 RESEARCHER_SYSTEM = """\
-You are Sigma_Researcher. Your function: gather raw evidence about the exact question given.
+You are Sigma_Researcher. Gather raw evidence about the exact question given.
 
 RULES:
-- Research ONLY the exact question. Do not drift to other topics.
-- If search results are off-topic, state "Search data not relevant" and use internal knowledge.
-- Mark uncertain claims [UNVERIFIED].
+- Research ONLY the exact question. Do not drift.
+- If live web data is provided and relevant, extract every useful fact from it.
+- If web data is off-topic or unavailable, USE YOUR INTERNAL TRAINING KNOWLEDGE.
+  NEVER say "Search data not relevant" and stop. You must always produce ≥3 findings.
+- Tag claims from internal knowledge with [INTERNAL].
+- Tag uncertain claims with [UNVERIFIED].
 - No analysis. No opinion. No conclusions. Raw facts only.
 
-Output format: a numbered list of findings. Nothing else."""
+Output: a numbered list of findings (minimum 3). Nothing else."""
 
 
 SYNTHESIZER_SYSTEM = """\
-You are Prime_Synthesizer. Your function: turn research findings into a structured draft.
+You are Prime_Synthesizer. Convert research findings into a structured draft.
 
 RULES:
-- Work ONLY from the research provided. Never hallucinate facts.
-- If coverage on a point is thin, write "Coverage limited here."
-- Never write: Introduction, Conclusion, or Summary.
-- Never produce code unless the original question asked for it.
+- Draw from the research provided; supplement with your own knowledge where coverage is thin.
+- NEVER output "no information is available" or any variant — always produce real content.
+- Never write: Introduction, Conclusion, or Summary headers.
+- Never produce code unless the original question explicitly asked for it.
 
 Required output format — no exceptions:
 
@@ -52,71 +55,96 @@ Required output format — no exceptions:
 
 
 CRITIC_SYSTEM = """\
-You are Omega_Critic. Your function: quality-gate a draft against the original question.
+You are Omega_Critic. Quality-gate the draft against the original question.
 
-Check in this order — stop at first failure:
-1. Does the draft answer the ORIGINAL question?  If not  → REJECT
-2. Claims not present in the research?           If yes  → REJECT (list each one)
-3. Off-topic content unrelated to question?      If yes  → REJECT (identify it)
-4. "Introduction" / "Conclusion" / unrequested code?  If yes → REJECT
+Check in order — stop at the first failure:
+1. Does the draft answer the ORIGINAL question with specific, real information?
+   A draft that says "no data available", discusses agent failures, or
+   narrates process issues instead of answering → REJECT.
+2. Does the draft contain obviously false factual claims? If yes → REJECT (list each).
+3. Off-topic content unrelated to the question? If yes → REJECT (identify it).
+4. Format violations: "Introduction"/"Conclusion" headers, or unrequested code? → REJECT.
 
-If all 4 checks pass, output exactly:  APPROVED
-If rejecting, output:  REJECT — [specific reason]"""
+NOTE: [INTERNAL] or [UNVERIFIED] tags are acceptable — internal knowledge is allowed.
+
+If all checks pass → output exactly:  APPROVED
+If rejecting  → output:  REJECT — [specific reason]"""
 
 
+# FIX 3: This is the critical fix. The old prompt said "address every objection by name"
+# which caused the Queen to literally echo the Critic's rejection message.
+# The new prompt explicitly bans that behavior and requires a real answer.
 QUEEN_SYSTEM = """\
-You are the Hive Queen. Your function: produce the final answer by integrating all agent outputs.
+You are the Hive Queen. Produce the FINAL, CORRECT ANSWER to the user's question.
 
-You receive: research findings, a synthesizer draft, and the critic's specific objections.
+You receive: original question, research findings, a synthesizer draft, critic objections.
 
-RULES:
-1. Address every objection the Critic raised — explicitly, by name.
-2. Add research findings the Synthesizer missed.
-3. Resolve contradictions between the research and the draft.
-4. Output must be strictly better than the draft alone — not a copy of it.
+⚠️  NON-NEGOTIABLE RULES:
+1. You MUST answer the original question with real, substantive information.
+2. If the Critic said the draft "does not answer the question" → ANSWER IT NOW.
+   Do NOT say "the draft failed." Do NOT say "the Critic rejected it."
+   Do NOT say "no information was provided." Just answer the question directly.
+3. Use your own knowledge freely when research is thin.
+4. NEVER produce meta-commentary about what other agents did, said, or failed to do.
+5. "No information is available" is never an acceptable answer unless you genuinely
+   have zero knowledge on the topic whatsoever.
 
 Required output format:
 
 🎯 The Bottom Line
-(2-sentence direct answer)
+(2-sentence DIRECT factual answer to the original question)
 
 🧠 Context
-(enriched explanation using all three agent inputs)
+(real facts and explanation — not commentary about agents or the research process)
 
 📊 Key Data Points
-- (point 1)
-- (point 2)
-- (point 3)"""
+- (concrete fact 1)
+- (concrete fact 2)
+- (concrete fact 3)"""
 
 
 CODER_SYSTEM = """\
 You are Alpha_Coder. Write clean, working code for the exact request.
-Add inline comments only for non-obvious logic.
+Inline comments only for non-obvious logic.
 No prose outside code blocks unless explicitly asked."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TOOL
+# TOOL  (FIX 1: context manager + retry-with-backoff)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def tool_web_search(query: str) -> str:
+def tool_web_search(query: str, retries: int = 2) -> str:
+    """
+    DuckDuckGo text search.
+    - Uses `with DDGS()` context manager (required by duckduckgo_search ≥ 5.x).
+    - Retries up to `retries` times with exponential backoff on any exception.
+    - Returns a plain-text fallback message so the Researcher can still use
+      internal knowledge instead of crashing.
+    """
     print(f"    [SEARCH] {query!r}")
-    try:
-        results = DDGS().text(query, max_results=3)
-        if not results:
-            return "No results found."
-        return "\n".join(
-            f"[{i+1}] {r.get('title', '')}: {r.get('body', '')}"
-            for i, r in enumerate(results)
-        )
-    except Exception as e:
-        return f"Search failed ({e}). Use internal knowledge only."
+    for attempt in range(retries + 1):
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=4))
+            if results:
+                return "\n".join(
+                    f"[{i+1}] {r.get('title', '')}: {r.get('body', '')}"
+                    for i, r in enumerate(results)
+                )
+            return "No results returned. Use your internal knowledge."
+        except Exception as e:
+            if attempt < retries:
+                wait = 1.5 ** attempt          # 1.0 s, then 1.5 s
+                print(f"    [SEARCH] attempt {attempt+1} failed ({e}). "
+                      f"Retry in {wait:.1f}s…")
+                time.sleep(wait)
+            else:
+                print(f"    [SEARCH] all attempts failed: {e}")
+                return "Search unavailable. Use your internal knowledge only."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM WRAPPER
-# Critical fix: system prompt goes in {"role": "system"}, user content goes in
-# {"role": "user"} — never merged into a single user message.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def call_agent(system_prompt: str, user_content: str, temp: float = 0.3) -> str:
@@ -124,8 +152,8 @@ def call_agent(system_prompt: str, user_content: str, temp: float = 0.3) -> str:
         r = groq_client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": system_prompt},  # role enforcement
-                {"role": "user",   "content": user_content},   # scoped task input only
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_content},
             ],
             max_tokens=1500,
             temperature=temp,
@@ -137,9 +165,6 @@ def call_agent(system_prompt: str, user_content: str, temp: float = 0.3) -> str:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MULTI-ANGLE RESEARCH
-# This is where swarm diversity actually comes from.
-# Same researcher, three different cognitive mandates → three different lenses.
-# Kimi does this with parallel sub-agents. We do it with sequential angle calls.
 # ─────────────────────────────────────────────────────────────────────────────
 
 ANGLES = [
@@ -148,17 +173,18 @@ ANGLES = [
     ("risks",    "Find counterarguments, downsides, risks, and criticism related to: "),
 ]
 
+
 def run_multi_angle_research(user_prompt: str) -> tuple[str, list]:
     history, findings = [], []
     for angle, prefix in ANGLES:
         live_data = tool_web_search(prefix + user_prompt)
-        # Researcher context: query + live data. NOTHING ELSE — no dossier, no history.
         researcher_input = (
             f"Research angle: {angle}\n"
             f"Question: {user_prompt}\n\n"
-            f"Live web data (use only if relevant to the question above):\n{live_data}"
+            f"Live web data (use if relevant; fall back to internal knowledge otherwise):\n"
+            f"{live_data}"
         )
-        output = call_agent(RESEARCHER_SYSTEM, researcher_input, temp=0.5)  # higher temp for coverage
+        output = call_agent(RESEARCHER_SYSTEM, researcher_input, temp=0.5)
         findings.append(f"=== [{angle.upper()} ANGLE] ===\n{output}")
         history.append({"node": f"Sigma_Researcher[{angle}]", "output": output})
         print(f"    [Sigma/{angle}] complete.")
@@ -170,9 +196,11 @@ def run_multi_angle_research(user_prompt: str) -> tuple[str, list]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _CODE_RE = re.compile(
-    r'\b(write code|write a|code|python|script|implement|function|c\+\+|html|css|javascript|java|program)\b',
+    r'\b(write code|write a|code|python|script|implement|function|c\+\+|html|css|'
+    r'javascript|java|program)\b',
     re.IGNORECASE,
 )
+
 
 def get_routing_plan(prompt: str) -> List[str]:
     if _CODE_RE.search(prompt):
@@ -182,19 +210,16 @@ def get_routing_plan(prompt: str) -> List[str]:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SWARM PIPELINE
-# Context isolation is enforced per phase. Each agent sees ONLY what it needs.
-# The dossier never bleeds across sessions or across unrelated queries.
-# External API is identical to v8.5 — Streamlit frontend needs zero changes.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_swarm(user_prompt: str) -> dict:
-    print(f"\n[SWARM v9.0] Query: {user_prompt[:60]}...")
+    print(f"\n[SWARM v9.1] Query: {user_prompt[:60]}...")
     history = []
 
     plan = get_routing_plan(user_prompt)
     print(f"[*] Plan: {plan}")
 
-    # ── Coding fast path ─────────────────────────────────────────────────────
+    # ── Coding fast path ──────────────────────────────────────────────────────
     if plan == ["Alpha_Coder"]:
         print("[Alpha_Coder] Running...")
         output = call_agent(CODER_SYSTEM, user_prompt)
@@ -202,15 +227,12 @@ def run_swarm(user_prompt: str) -> dict:
         return {"plan": plan, "final_answer": output, "history": history}
 
     # ── Phase 1: Research ─────────────────────────────────────────────────────
-    # Each angle call receives: (query + live search). Nothing from prior sessions.
-    print("[Sigma_Researcher] Running 3 cognitive angles...")
+    print("[Sigma_Researcher] Running 3 cognitive angles…")
     research_output, research_history = run_multi_angle_research(user_prompt)
     history.extend(research_history)
 
-    # ── Phase 2: Synthesis ───────────────────────────────────────────────────
-    # Synthesizer receives: original question + research output.
-    # It does NOT receive the raw dossier, prior history, or unrelated context.
-    print("[Prime_Synthesizer] Drafting from research...")
+    # ── Phase 2: Synthesis ────────────────────────────────────────────────────
+    print("[Prime_Synthesizer] Drafting…")
     draft = call_agent(
         SYNTHESIZER_SYSTEM,
         f"Original question: {user_prompt}\n\nResearch findings:\n{research_output}",
@@ -218,25 +240,21 @@ def run_swarm(user_prompt: str) -> dict:
     )
     history.append({"node": "Prime_Synthesizer", "output": draft})
 
-    # ── Phase 3: Critic ──────────────────────────────────────────────────────
-    # Critic receives: original question + draft.
-    # NOT the raw research — prevents confirmation bias in the quality gate.
-    print("[Omega_Critic] Auditing...")
+    # ── Phase 3: Critic ───────────────────────────────────────────────────────
+    print("[Omega_Critic] Auditing…")
     critique = call_agent(
         CRITIC_SYSTEM,
         f"Original question: {user_prompt}\n\nDraft to review:\n{draft}",
-        temp=0.1,  # lowest temp — strict binary judgement
+        temp=0.1,
     )
     history.append({"node": "Omega_Critic", "output": critique})
 
-    # ── Phase 4: Queen integration ───────────────────────────────────────────
-    # Queen is the ONE place where all outputs merge.
-    # If Critic approved, the draft was clean — skip the extra LLM call.
+    # ── Phase 4: Queen integration ────────────────────────────────────────────
     if "APPROVED" in critique.upper():
-        print("[*] Critic APPROVED. Draft is the final answer.")
+        print("[*] Critic APPROVED — draft is the final answer.")
         final_answer = draft
     else:
-        print("[Hive_Queen] Integrating critique into final answer...")
+        print("[Hive_Queen] Integrating critique into final answer…")
         final_answer = call_agent(
             QUEEN_SYSTEM,
             (
@@ -250,3 +268,46 @@ def run_swarm(user_prompt: str) -> dict:
 
     history.append({"node": "Hive_Queen", "output": final_answer})
     return {"plan": plan, "final_answer": final_answer, "history": history}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX 5: format_swarm_trace()
+# Call this in your Streamlit app to render each agent's output separately.
+# That's what makes the UI actually look like a swarm, not a single monologue.
+#
+# Streamlit usage example:
+#
+#   result = run_swarm(user_query)
+#   for entry in result["history"]:
+#       icon = AGENT_ICONS.get(entry["node"], "🤖")
+#       with st.expander(f"{icon}  {entry['node']}", expanded=False):
+#           st.markdown(entry["output"])
+#   st.markdown("---")
+#   st.markdown("### 👑 Final Answer")
+#   st.markdown(result["final_answer"])
+# ─────────────────────────────────────────────────────────────────────────────
+
+AGENT_ICONS = {
+    "Sigma_Researcher[facts]":    "🔎",
+    "Sigma_Researcher[analysis]": "🧩",
+    "Sigma_Researcher[risks]":    "⚠️ ",
+    "Prime_Synthesizer":          "📝",
+    "Omega_Critic":               "🛡️ ",
+    "Hive_Queen":                 "👑",
+    "Alpha_Coder":                "💻",
+}
+
+
+def format_swarm_trace(result: dict) -> str:
+    """
+    Returns the full swarm trace as a formatted string for terminal output.
+    For Streamlit, use the st.expander() pattern shown above instead.
+    """
+    BAR  = "─" * 54
+    WIDE = "═" * 54
+    sections = [f"\n{WIDE}\n  🐝  SWARM TRACE\n{WIDE}"]
+    for entry in result["history"]:
+        icon = AGENT_ICONS.get(entry["node"], "🤖")
+        sections.append(f"\n{icon}  {entry['node']}\n{BAR}\n{entry['output']}")
+    sections.append(f"\n{WIDE}")
+    return "\n".join(sections)
