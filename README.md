@@ -4,8 +4,7 @@
 
 A distributed artificial intelligence framework inspired by biological swarm intelligence and hive collective consciousness. SwarmAI orchestrates multiple AI agents as a coordinated swarm, enabling[...]
 
-🔗 **Live Demo**: https://swarmai-7znybrr5khwjozqxabefcn.streamlit.app/
-
+🔗 **Live Demo**: https://swarmai-sfe55kntkyqv4h3vyd9zij.streamlit.app
 ---
 
 ## 🌐 Overview
