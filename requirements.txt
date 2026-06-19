@@ -1,8 +1,5 @@
 streamlit
 groq
-sentence-transformers
-scikit-learn
-numpy
 duckduckgo-search
 requests
 PyPDF2
