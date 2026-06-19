@@ -21,7 +21,6 @@ html, body, [data-testid="stAppViewContainer"] {
     background: #0e0e0f !important;
     font-family: 'DM Sans', sans-serif !important;
 }
-/* WE REMOVED THE SIDEBAR DISPLAY:NONE SO YOU CAN UPLOAD PDFS! */
 [data-testid="stMain"] > div {
     max-width: 720px !important;
     margin: 0 auto !important;
@@ -151,6 +150,7 @@ with st.sidebar:
     st.markdown("<h3 style='color: #f0f0f0;'>📂 Secure Vault</h3>", unsafe_allow_html=True)
     st.markdown("<p style='color: #888; font-size: 13px;'>Upload a private PDF. The Swarm will analyze it locally.</p>", unsafe_allow_html=True)
     uploaded_file = st.file_uploader("", type="pdf")
+    
     if uploaded_file is not None:
         try:
             pdf_reader = PyPDF2.PdfReader(uploaded_file)
@@ -158,22 +158,15 @@ with st.sidebar:
             for page in pdf_reader.pages:
                 if page.extract_text():
                     text += page.extract_text() + "\n"
+            
+            # Limit to 12,000 characters to prevent Groq API Token crashes
             if len(text) > 12000:
                 text = text[:12000] + "\n\n...[Document Truncated to fit Swarm Memory]..."
+                
             st.session_state.document_context = text  # SAVE TO STATE
             st.success("✅ Securely Loaded")
             with st.expander("Preview Text"):
                 st.write(text[:300] + "...")
-        except Exception as e:
-            st.error(f"Error reading PDF: {e}")
-            
-            # Limit to 12,000 characters to prevent Groq API Token crashes
-            if len(document_context) > 12000:
-                document_context = document_context[:12000] + "\n\n...[Document Truncated to fit Swarm Memory]..."
-                
-            st.success("✅ Securely Loaded")
-            with st.expander("Preview Text"):
-                st.write(document_context[:300] + "...")
         except Exception as e:
             st.error(f"Error reading PDF: {e}")
 
@@ -197,7 +190,8 @@ if "messages" not in st.session_state:
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        if msg["role"] == "assistant" and "route" in msg:
+        # Only show the route pill if it's an assistant AND route exists and isn't empty
+        if msg["role"] == "assistant" and msg.get("route"):
             route_text = " · ".join(msg["route"])
             st.markdown(
                 f'<div class="route-pill"><span class="route-dot"></span>{route_text}</div>',
@@ -215,8 +209,8 @@ if prompt := st.chat_input("Ask the Swarm anything..."):
 
     # 2. Secretly build the massive prompt with the PDF text
     full_prompt = prompt
-    if document_context != "":
-        full_prompt = f"HERE IS A PRIVATE DOCUMENT FOR CONTEXT:\n\n{document_context}\n\nUSER QUESTION REGARDING THE DOCUMENT: {prompt}"
+    if st.session_state.document_context != "":
+        full_prompt = f"HERE IS A PRIVATE DOCUMENT FOR CONTEXT:\n\n{st.session_state.document_context}\n\nUSER QUESTION REGARDING THE DOCUMENT: {prompt}"
 
     # 3. Process with the Swarm
     with st.chat_message("assistant"):
@@ -229,16 +223,17 @@ if prompt := st.chat_input("Ask the Swarm anything..."):
         """, unsafe_allow_html=True)
 
         # Send the hidden massive prompt to the backend
-try:
-        result = run_swarm(full_prompt)
-    except Exception as e:
-        result = {
-            "plan": [],
-            "final_answer": f"⚠️ **Swarm Error:** The agents encountered an issue: `{e}`",
-            "history": []
-        }
-        
-    thinking.empty()
+        try:
+            result = run_swarm(full_prompt)
+        except Exception as e:
+            result = {
+                "plan": [],
+                "final_answer": f"⚠️ **Swarm Error:** The agents encountered an issue: `{e}`",
+                "history": []
+            }
+        finally:
+            # This ensures the thinking animation goes away even if it crashes
+            thinking.empty()
 
         route = result.get("plan", [])
         if route:
