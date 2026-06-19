@@ -144,19 +144,28 @@ hr { border-color: #1a1a1c !important; margin: 24px 0 !important; }
 """, unsafe_allow_html=True)
 
 # --- SIDEBAR: SECURE PDF UPLOAD ---
-document_context = ""
+if "document_context" not in st.session_state:
+    st.session_state.document_context = ""
+
 with st.sidebar:
     st.markdown("<h3 style='color: #f0f0f0;'>📂 Secure Vault</h3>", unsafe_allow_html=True)
     st.markdown("<p style='color: #888; font-size: 13px;'>Upload a private PDF. The Swarm will analyze it locally.</p>", unsafe_allow_html=True)
-    
     uploaded_file = st.file_uploader("", type="pdf")
-    
     if uploaded_file is not None:
         try:
             pdf_reader = PyPDF2.PdfReader(uploaded_file)
+            text = ""
             for page in pdf_reader.pages:
                 if page.extract_text():
-                    document_context += page.extract_text() + "\n"
+                    text += page.extract_text() + "\n"
+            if len(text) > 12000:
+                text = text[:12000] + "\n\n...[Document Truncated to fit Swarm Memory]..."
+            st.session_state.document_context = text  # SAVE TO STATE
+            st.success("✅ Securely Loaded")
+            with st.expander("Preview Text"):
+                st.write(text[:300] + "...")
+        except Exception as e:
+            st.error(f"Error reading PDF: {e}")
             
             # Limit to 12,000 characters to prevent Groq API Token crashes
             if len(document_context) > 12000:
@@ -220,8 +229,16 @@ if prompt := st.chat_input("Ask the Swarm anything..."):
         """, unsafe_allow_html=True)
 
         # Send the hidden massive prompt to the backend
+try:
         result = run_swarm(full_prompt)
-        thinking.empty()
+    except Exception as e:
+        result = {
+            "plan": [],
+            "final_answer": f"⚠️ **Swarm Error:** The agents encountered an issue: `{e}`",
+            "history": []
+        }
+        
+    thinking.empty()
 
         route = result.get("plan", [])
         if route:
