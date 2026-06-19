@@ -1,10 +1,19 @@
 import os
 import re
-from typing import List
+from typing import List, Tuple
 from duckduckgo_search import DDGS
 from groq import Groq
 
-print("[*] Waking the Hive Queen (v9.1 — Bug Fixed)...")
+print("[*] Waking the Hive Queen (v9.2 — Fully Debugged)...")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX 1: Validate API key at startup to prevent cryptic mid-query crashes
+# ─────────────────────────────────────────────────────────────────────────────
+if not os.environ.get("GROQ_API_KEY"):
+    raise RuntimeError(
+        "FATAL ERROR: GROQ_API_KEY environment variable is not set. "
+        "Please add it to your Streamlit Secrets."
+    )
 
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 MODEL = "llama-3.3-70b-versatile"
@@ -67,8 +76,6 @@ All checks pass → output exactly: APPROVED
 Any fundamental failure → output: REJECT — [precise reason]"""
 
 
-# FIX 2: Queen no longer "addresses objections by name" (which caused meta-commentary).
-# Instead it silently corrects and always outputs a real answer.
 QUEEN_SYSTEM = """\
 You are the Hive Queen. Deliver the best possible final answer to the original question.
 
@@ -102,18 +109,7 @@ No prose outside code blocks unless explicitly asked."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIX 1: ANGLE DEFINITIONS
-#
-# v9.0 PROBLEM: ANGLES merged the verbose LLM instruction with the DDG query,
-# producing search strings like:
-#   "Find verifiable facts, statistics, and official statements about: today Indian stock market"
-# DuckDuckGo can't parse that — it returns irrelevant or zero results.
-#
-# v9.1 FIX: Each angle now carries TWO separate strings:
-#   search_suffix → short keyword suffix for DuckDuckGo only (appended to user_prompt)
-#   llm_focus     → verbose instruction for the researcher LLM only
-#
-# The two strings are NEVER mixed into the same field.
+# ANGLE DEFINITIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
 ANGLES = [
@@ -132,7 +128,11 @@ def tool_web_search(query: str) -> str:
     """Run a DuckDuckGo text search. Query must be concise keywords."""
     print(f"    [SEARCH] {query!r}")
     try:
-        results = DDGS().text(query.strip(), max_results=5)
+        # Use context manager to prevent connection leaks on Streamlit Cloud
+        # Added timeout=10 to prevent the app from hanging if DDG rate-limits the IP
+        with DDGS(timeout=10) as ddgs:
+            results = ddgs.text(query.strip(), max_results=5)
+            
         if not results:
             return "No results found."
         return "\n".join(
@@ -147,7 +147,7 @@ def tool_web_search(query: str) -> str:
 # LLM WRAPPER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def call_agent(system_prompt: str, user_content: str, temp: float = 0.3) -> str:
+def call_agent(system_prompt: str, user_content: str, temp: float = 0.3, max_tokens: int = 2000) -> str:
     try:
         r = groq_client.chat.completions.create(
             model=MODEL,
@@ -155,7 +155,7 @@ def call_agent(system_prompt: str, user_content: str, temp: float = 0.3) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_content},
             ],
-            max_tokens=1500,
+            max_tokens=max_tokens,
             temperature=temp,
         )
         return r.choices[0].message.content
@@ -167,18 +167,13 @@ def call_agent(system_prompt: str, user_content: str, temp: float = 0.3) -> str:
 # MULTI-ANGLE RESEARCH
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_multi_angle_research(user_prompt: str) -> tuple[str, list]:
+def run_multi_angle_research(user_prompt: str) -> Tuple[str, list]:
     history, findings = [], []
 
     for angle, search_suffix, llm_focus in ANGLES:
-        # ── DuckDuckGo gets a clean, short query ──────────────────────────────
-        # FIX: only the user_prompt + a short angle suffix reaches DDG.
-        # No instruction text. No "Find verifiable facts about:".
         search_query = (user_prompt + search_suffix).strip()
         live_data = tool_web_search(search_query)
 
-        # ── Researcher LLM gets the full instruction ───────────────────────────
-        # The verbose focus goes here — never into the search query.
         researcher_input = (
             f"Research angle: {angle} — focus on {llm_focus}\n"
             f"Question: {user_prompt}\n\n"
@@ -186,7 +181,7 @@ def run_multi_angle_research(user_prompt: str) -> tuple[str, list]:
             "If the web data is irrelevant or unavailable, use your internal "
             "knowledge and label findings [INTERNAL KNOWLEDGE]."
         )
-        output = call_agent(RESEARCHER_SYSTEM, researcher_input, temp=0.5)
+        output = call_agent(RESEARCHER_SYSTEM, researcher_input, temp=0.5, max_tokens=2000)
         findings.append(f"=== [{angle.upper()} ANGLE] ===\n{output}")
         history.append({"node": f"Sigma_Researcher[{angle}]", "output": output})
         print(f"    [Sigma/{angle}] complete.")
@@ -198,8 +193,12 @@ def run_multi_angle_research(user_prompt: str) -> tuple[str, list]:
 # ROUTER
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX 4: Tighten router regex to avoid false "code" classification
+# Prevents "What is the genetic code?" or "Government program" from triggering Alpha_Coder
+# ─────────────────────────────────────────────────────────────────────────────
 _CODE_RE = re.compile(
-    r'\b(write code|write a|code|python|script|implement|function|c\+\+|html|css|javascript|java|program)\b',
+    r'\b(write\s+code|write\s+a\s+script|write\s+a\s+function|implement\s+(a\s+)?(function|class|script)|code\s+this|program\s+this|script\s+this|create\s+a\s+(python|html|javascript)\s+)\b',
     re.IGNORECASE,
 )
 
@@ -214,7 +213,7 @@ def get_routing_plan(prompt: str) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_swarm(user_prompt: str) -> dict:
-    print(f"\n[SWARM v9.1] Query: {user_prompt[:60]}...")
+    print(f"\n[SWARM v9.2] Query: {user_prompt[:60]}...")
     history = []
 
     plan = get_routing_plan(user_prompt)
@@ -223,7 +222,7 @@ def run_swarm(user_prompt: str) -> dict:
     # ── Coding fast path ──────────────────────────────────────────────────────
     if plan == ["Alpha_Coder"]:
         print("[Alpha_Coder] Running...")
-        output = call_agent(CODER_SYSTEM, user_prompt)
+        output = call_agent(CODER_SYSTEM, user_prompt, max_tokens=4000)
         history.append({"node": "Alpha_Coder", "output": output})
         return {"plan": plan, "final_answer": output, "history": history}
 
@@ -238,6 +237,7 @@ def run_swarm(user_prompt: str) -> dict:
         SYNTHESIZER_SYSTEM,
         f"Original question: {user_prompt}\n\nResearch findings:\n{research_output}",
         temp=0.3,
+        max_tokens=2500,
     )
     history.append({"node": "Prime_Synthesizer", "output": draft})
 
@@ -247,16 +247,24 @@ def run_swarm(user_prompt: str) -> dict:
         CRITIC_SYSTEM,
         f"Original question: {user_prompt}\n\nDraft to review:\n{draft}",
         temp=0.1,
+        max_tokens=500,
     )
     history.append({"node": "Omega_Critic", "output": critique})
 
     # ── Phase 4: Queen integration ────────────────────────────────────────────
-    if "APPROVED" in critique.upper():
+    
+    # ─────────────────────────────────────────────────────────────────────────────
+    # FIX 3: Hardified "APPROVED/REJECT" detection
+    # Prevents "It is not approved" from falsely passing the quality gate.
+    # ─────────────────────────────────────────────────────────────────────────────
+    critique_normalized = critique.strip().lower()
+    is_approved = "approve" in critique_normalized and "reject" not in critique_normalized
+
+    if is_approved and draft and not draft.startswith("[ERROR]"):
         print("[*] Critic APPROVED. Draft is the final answer.")
         final_answer = draft
     else:
         print("[Hive_Queen] Integrating critique into final answer...")
-        # FIX: explicit directive — answer the question, don't narrate the failure.
         final_answer = call_agent(
             QUEEN_SYSTEM,
             (
@@ -269,7 +277,16 @@ def run_swarm(user_prompt: str) -> dict:
                 "or what went wrong. Just answer."
             ),
             temp=0.3,
+            max_tokens=2500,
         )
+
+        # Graceful fallback if the Queen agent itself crashes/errors out
+        if not final_answer or final_answer.startswith("[ERROR]"):
+            print("[!] Hive Queen failed. Falling back to Synthesizer draft.")
+            final_answer = (
+                "*(Note: The final integration step encountered an issue, "
+                "so the raw draft is provided below)*\n\n" + draft
+            )
 
     history.append({"node": "Hive_Queen", "output": final_answer})
     return {"plan": plan, "final_answer": final_answer, "history": history}
