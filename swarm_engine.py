@@ -49,10 +49,11 @@ AGENT_DEFS = {
         "system_prompt": (
             "You are a Senior Research Analyst. Your ONLY job is to gather raw evidence and then hand off to the Synthesizer.\n"
             "STRICT WORKFLOW:\n"
-            "1. If you need live data, call `tool_web_search`.\n"
-            "2. CRITICAL: When you get search results, extract the specific facts, headlines, and details from the 'body' of the results. Do NOT just list the names of the websites. Extract the actual stories.\n"
-            "3. You MUST call `save_artifact` with key 'research' containing the detailed findings.\n"
-            "4. After saving, you MUST call `delegate_to_agent` with agent_name 'General_Synthesizer'.\n"
+            "1. Call `tool_web_search` to get live data.\n"
+            "2. CRITICAL: If the search returns 'no results' or fails, you MUST NOT just report the failure. You must use your own internal training data to answer the user's question and label those findings as [INTERNAL KNOWLEDGE].\n"
+            "3. When you have findings (from search or internal knowledge), extract the specific facts and details. Do NOT just list website names.\n"
+            "4. You MUST call `save_artifact` with key 'research' containing the detailed findings.\n"
+            "5. After saving, you MUST call `delegate_to_agent` with agent_name 'General_Synthesizer'.\n"
             "DO NOT delegate to yourself. DO NOT stop without delegating to General_Synthesizer. DO NOT answer the user directly."
         ),
         "tools": ["tool_web_search", "save_artifact", "delegate_to_agent"],
@@ -104,14 +105,24 @@ AGENT_DEFS = {
 # 3. TOOL IMPLEMENTATIONS
 # ==============================================================================
 def tool_web_search(query: str) -> str:
-    print(f"    [TOOL] Web Search: {query}")
+    """Run a DuckDuckGo text search. Use for current events, facts, or external data."""
+    # Clean up conversational queries to make them search-friendly
+    clean_query = query.replace("top 3", "").replace("today", "").strip()
+    print(f"    [TOOL_EXEC] Searching: {clean_query!r} (Original: {query!r})")
+    
     try:
         with DDGS(timeout=10) as ddgs:
-            results = ddgs.text(query.strip(), max_results=5)
-        if not results: return "No results found."
-        return "\n".join(f"[{i+1}] {r.get('title', '')}: {r.get('body', '')}" for i, r in enumerate(results))
+            results = ddgs.text(clean_query, max_results=5)
+            
+        if not results:
+            return "Web search returned no results. You MUST rely on your internal knowledge to answer the user's question. Label findings [INTERNAL KNOWLEDGE]."
+            
+        return "\n".join(
+            f"[{i+1}] {r.get('title', '')}: {r.get('body', '')}"
+            for i, r in enumerate(results)
+        )
     except Exception as e:
-        return f"Search failed ({e})."
+        return f"Search failed due to rate limiting or error ({e}). You MUST rely on your internal knowledge to answer the user's question. Label findings [INTERNAL KNOWLEDGE]."
 
 TOOL_SCHEMAS = [
     {
