@@ -151,8 +151,9 @@ TOOL_SCHEMAS = [
 ]
 
 # ==============================================================================
-# 4. THE AGENTIC EXECUTION LOOP
+# 4. THE AGENTIC EXECUTION LOOP (FIXED)
 # ==============================================================================
+
 def execute_agent_loop(state: SwarmState, max_steps: int = 10) -> dict:
     step = 0
     
@@ -164,11 +165,14 @@ def execute_agent_loop(state: SwarmState, max_steps: int = 10) -> dict:
         print(f"\n[STEP {step}] Executing Agent: {agent_name}")
         state.plan.append(agent_name)
 
+        # FIX: Groq requires the system prompt to be INSIDE the messages array.
+        # We dynamically prepend the current agent's system prompt to the history.
+        api_messages = [{"role": "system", "content": agent_def["system_prompt"]}] + state.messages
+
         try:
             response = client.chat.completions.create(
                 model=MODEL,
-                messages=state.messages,
-                system_prompt=agent_def["system_prompt"],
+                messages=api_messages, # Use the modified list
                 tools=TOOL_SCHEMAS,
                 tool_choice="auto",
                 max_tokens=2000,
@@ -181,7 +185,9 @@ def execute_agent_loop(state: SwarmState, max_steps: int = 10) -> dict:
 
         choice = response.choices[0]
         
+        # If the agent wants to call a tool
         if choice.finish_reason == "tool_calls":
+            # Add the assistant's tool call request to history
             state.messages.append(choice.message)
             
             for tool_call in choice.message.tool_calls:
@@ -190,14 +196,16 @@ def execute_agent_loop(state: SwarmState, max_steps: int = 10) -> dict:
                 
                 print(f"    [ACTION] {func_name}({func_args})")
 
+                # --- EXECUTE TOOLS ---
                 if func_name == "delegate_to_agent":
                     next_agent = func_args["agent_name"]
+                    # Security: Ensure the agent is allowed to delegate there
                     if next_agent not in agent_def["allowed_transitions"]:
                         observation = f"Error: You are not allowed to delegate to {next_agent}. Allowed: {agent_def['allowed_transitions']}"
                     else:
                         state.current_agent = next_agent
                         observation = f"Control handed over to {next_agent}."
-                        # Add context message for the next agent
+                        # Add the message to the history for the next agent
                         state.messages.append({"role": "user", "content": f"Message from {agent_name}: {func_args['message']}"})
 
                 elif func_name == "save_artifact":
@@ -208,8 +216,9 @@ def execute_agent_loop(state: SwarmState, max_steps: int = 10) -> dict:
                     observation = state.get_artifact(func_args["key"])
 
                 elif func_name == "finish_task":
+                    # End the loop immediately
                     if "final_answer" not in state.artifacts:
-                        state.add_artifact("final_answer", "Task finished, but no final answer was saved by the Queen.")
+                        state.add_artifact("final_answer", "Task finished, but no final answer was saved.")
                     return state.to_dict()
 
                 elif func_name == "tool_web_search":
@@ -218,6 +227,7 @@ def execute_agent_loop(state: SwarmState, max_steps: int = 10) -> dict:
                 else:
                     observation = f"Error: Tool {func_name} not found."
 
+                # Append the tool result back to the LLM
                 state.messages.append({
                     "role": "tool",
                     "name": func_name,
@@ -226,6 +236,7 @@ def execute_agent_loop(state: SwarmState, max_steps: int = 10) -> dict:
                 })
         
         elif choice.finish_reason == "stop":
+            # If the agent stops without calling a tool, force a delegation or end
             state.messages.append({"role": "assistant", "content": choice.message.content})
             state.messages.append({"role": "user", "content": "You must use a tool to proceed. Either delegate to another agent, save your work, or finish the task."})
         
@@ -234,7 +245,6 @@ def execute_agent_loop(state: SwarmState, max_steps: int = 10) -> dict:
 
     state.add_artifact("final_answer", "⚠️ Swarm exceeded maximum steps. Task aborted to prevent infinite loops.")
     return state.to_dict()
-
 # ==============================================================================
 # 5. ENTRY POINT
 # ==============================================================================
