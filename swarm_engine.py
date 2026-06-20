@@ -47,32 +47,33 @@ AGENT_DEFS = {
     },
     "Research_Analyst": {
         "system_prompt": (
-            "You are a Senior Research Analyst. Your only job is to gather raw evidence. "
-            "If the user asks for current data, news, or facts, you MUST use the `tool_web_search` function. "
-            "CRITICAL: Do NOT output text like '<function=...>'. Only use the standard JSON tool calling format provided by the API. "
-            "Do not answer from memory if live data is requested. Call the search tool. "
-            "After you receive the search results, use `save_artifact` to save your findings, and then use `delegate_to_agent` to pass the task to the General_Synthesizer."
+            "You are a Senior Research Analyst. Your ONLY job is to gather raw evidence and then hand off to the Synthesizer.\n"
+            "STRICT WORKFLOW:\n"
+            "1. If you need live data, call `tool_web_search`.\n"
+            "2. Once you have findings (from search or your own knowledge), you MUST call `save_artifact` with key 'research'.\n"
+            "3. After saving, you MUST call `delegate_to_agent` with agent_name 'General_Synthesizer'.\n"
+            "DO NOT delegate to yourself. DO NOT stop without delegating to General_Synthesizer. DO NOT answer the user directly."
         ),
         "tools": ["tool_web_search", "save_artifact", "delegate_to_agent"],
         "allowed_transitions": ["General_Synthesizer"]
     },
     "IT_Coder": {
-        "system_prompt": "You are a Senior Software Engineer. Write clean, working code for the request. Save your code to the workspace as 'draft' and delegate to the QA_Auditor for review. Do NOT output XML tags like <function=...>. Only use the provided JSON tool format.",
+        "system_prompt": "You are a Senior Software Engineer. Write clean, working code for the request. Save your code to the workspace as 'draft' and delegate to the QA_Auditor for review. DO NOT delegate to yourself. DO NOT output XML tags.",
         "tools": ["save_artifact", "delegate_to_agent"],
         "allowed_transitions": ["QA_Auditor"]
     },
     "General_Synthesizer": {
-        "system_prompt": "You are a Synthesizer. Read the research from the workspace (if any). Write a comprehensive answer using the required format (🎯 Bottom Line, 🧠 Context, 📊 Data Points). Save the draft and delegate to the QA_Auditor. Do NOT output XML tags like <function=...>. Only use the provided JSON tool format.",
+        "system_prompt": "You are a Synthesizer. Read the research from the workspace using `read_artifact`. Write a comprehensive answer using the required format (🎯 Bottom Line, 🧠 Context, 📊 Data Points). Save the draft using `save_artifact` key 'draft' and then delegate to the QA_Auditor. DO NOT delegate to yourself.",
         "tools": ["read_artifact", "save_artifact", "delegate_to_agent"],
         "allowed_transitions": ["QA_Auditor"]
     },
     "QA_Auditor": {
-        "system_prompt": "You are the QA Auditor. Read the draft from the workspace. Check for hallucinations, off-topic content, and quality. If it is perfect, delegate to the Hive_Queen. If it needs fixes, delegate BACK to the agent who created it with instructions to fix it. Do NOT output XML tags like <function=...>. Only use the provided JSON tool format.",
+        "system_prompt": "You are the QA Auditor. Read the draft from the workspace using `read_artifact`. Check for quality. If perfect, delegate to Hive_Queen. If it needs fixes, delegate BACK to the agent who created it. DO NOT delegate to yourself.",
         "tools": ["read_artifact", "save_artifact", "delegate_to_agent"],
         "allowed_transitions": ["General_Synthesizer", "IT_Coder", "Hive_Queen"]
     },
     "Hive_Queen": {
-        "system_prompt": "You are the Hive Queen. You receive the final approved draft. Format it beautifully and save it as 'final_answer'. Then use the finish_task tool to end the swarm process. Do NOT output XML tags like <function=...>. Only use the provided JSON tool format.",
+        "system_prompt": "You are the Hive Queen. Read the draft from the workspace using `read_artifact`. Format it beautifully and save it as 'final_answer' using `save_artifact`. Then use the `finish_task` tool to end the swarm process. DO NOT output XML tags.",
         "tools": ["read_artifact", "save_artifact", "finish_task"],
         "allowed_transitions": []
     }
@@ -204,9 +205,15 @@ def execute_agent_loop(state: SwarmState, max_steps: int = 10) -> dict:
                 # --- EXECUTE TOOLS ---
                 if func_name == "delegate_to_agent":
                     next_agent = func_args["agent_name"]
+                    
+                    # Anti-Looping Mechanism: Prevent agent from delegating to itself
+                    if next_agent == agent_name:
+                        observation = f"CRITICAL ERROR: You cannot delegate to yourself! You are already {agent_name}. You MUST delegate to one of these agents: {agent_def['allowed_transitions']}."
+                    
                     # Security: Ensure the agent is allowed to delegate there
-                    if next_agent not in agent_def["allowed_transitions"]:
-                        observation = f"Error: You are not allowed to delegate to {next_agent}. Allowed: {agent_def['allowed_transitions']}"
+                    elif next_agent not in agent_def["allowed_transitions"]:
+                        observation = f"Error: You are not allowed to delegate to {next_agent}. You MUST delegate to one of these: {agent_def['allowed_transitions']}."
+                    
                     else:
                         state.current_agent = next_agent
                         observation = f"Control handed over to {next_agent}."
