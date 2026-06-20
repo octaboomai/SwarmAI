@@ -212,9 +212,53 @@ def execute_agent_loop(state: SwarmState, max_steps: int = 10) -> dict:
                 temperature=0.3
             )
         except Exception as e:
-            print(f"[ERROR] Groq API failed: {e}")
-            state.add_artifact("final_answer", f"⚠️ Swarm API Error: {e}")
-            return state.to_dict()
+            error_str = str(e)
+            # SELF-HEALING: If Llama-3 tries to output XML function calls instead of JSON, catch it!
+            if "failed_generation" in error_str and "<function=" in error_str:
+                print(f"    [SELF-HEAL] Caught XML function call. Parsing manually...")
+                import re
+                # Extract the function name and arguments from the XML string
+                match = re.search(r'<function=(\w+)=({.*?})</function>', error_str)
+                if match:
+                    func_name = match.group(1)
+                    func_args = json.loads(match.group(2))
+                    
+                    print(f"    [SELF-HEAL] Manually executing: {func_name}({func_args})")
+                    
+                    # Manually execute the search
+                    observation = ""
+                    if func_name == "tool_web_search":
+                        observation = tool_web_search(**func_args)
+                    else:
+                        observation = f"Error: Cannot auto-heal tool {func_name}."
+                    
+                    # Inject the results back into the LLM's memory as if it succeeded
+                    state.messages.append({
+                        "role": "assistant", 
+                        "content": None, 
+                        "tool_calls": [{
+                            "id": "healed_call_1", 
+                            "type": "function", 
+                            "function": {"name": func_name, "arguments": json.dumps(func_args)}
+                        }]
+                    })
+                    state.messages.append({
+                        "role": "tool", 
+                        "name": func_name, 
+                        "content": str(observation), 
+                        "tool_call_id": "healed_call_1"
+                    })
+                    
+                    # Continue the loop so the LLM processes the search results
+                    continue 
+                else:
+                    print(f"[ERROR] Unparsable API Error: {e}")
+                    state.add_artifact("final_answer", f"⚠️ Swarm API Error: {e}")
+                    return state.to_dict()
+            else:
+                print(f"[ERROR] Groq API failed: {e}")
+                state.add_artifact("final_answer", f"⚠️ Swarm API Error: {e}")
+                return state.to_dict()
 
         choice = response.choices[0]
         
