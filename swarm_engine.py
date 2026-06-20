@@ -46,32 +46,37 @@ AGENT_DEFS = {
         "allowed_transitions": ["Research_Analyst", "IT_Coder", "General_Synthesizer"]
     },
     "Research_Analyst": {
-        "system_prompt": "You are a Senior Research Analyst. Gather raw evidence. Use the web search tool if you need live data. Once you have findings, save them to the workspace and delegate to the Synthesizer.",
+        "system_prompt": (
+            "You are a Senior Research Analyst. Your only job is to gather raw evidence. "
+            "If the user asks for current data, news, or facts, you MUST use the `tool_web_search` function. "
+            "CRITICAL: Do NOT output text like '<function=...>'. Only use the standard JSON tool calling format provided by the API. "
+            "Do not answer from memory if live data is requested. Call the search tool. "
+            "After you receive the search results, use `save_artifact` to save your findings, and then use `delegate_to_agent` to pass the task to the General_Synthesizer."
+        ),
         "tools": ["tool_web_search", "save_artifact", "delegate_to_agent"],
         "allowed_transitions": ["General_Synthesizer"]
     },
     "IT_Coder": {
-        "system_prompt": "You are a Senior Software Engineer. Write clean, working code for the request. Save your code to the workspace as 'draft' and delegate to the QA_Auditor for review.",
+        "system_prompt": "You are a Senior Software Engineer. Write clean, working code for the request. Save your code to the workspace as 'draft' and delegate to the QA_Auditor for review. Do NOT output XML tags like <function=...>. Only use the provided JSON tool format.",
         "tools": ["save_artifact", "delegate_to_agent"],
         "allowed_transitions": ["QA_Auditor"]
     },
     "General_Synthesizer": {
-        "system_prompt": "You are a Synthesizer. Read the research from the workspace (if any). Write a comprehensive answer using the required format (🎯 Bottom Line, 🧠 Context, 📊 Data Points). Save the draft and delegate to the QA_Auditor.",
+        "system_prompt": "You are a Synthesizer. Read the research from the workspace (if any). Write a comprehensive answer using the required format (🎯 Bottom Line, 🧠 Context, 📊 Data Points). Save the draft and delegate to the QA_Auditor. Do NOT output XML tags like <function=...>. Only use the provided JSON tool format.",
         "tools": ["read_artifact", "save_artifact", "delegate_to_agent"],
         "allowed_transitions": ["QA_Auditor"]
     },
     "QA_Auditor": {
-        "system_prompt": "You are the QA Auditor. Read the draft from the workspace. Check for hallucinations, off-topic content, and quality. If it is perfect, delegate to the Hive_Queen. If it needs fixes, delegate BACK to the agent who created it with instructions to fix it.",
+        "system_prompt": "You are the QA Auditor. Read the draft from the workspace. Check for hallucinations, off-topic content, and quality. If it is perfect, delegate to the Hive_Queen. If it needs fixes, delegate BACK to the agent who created it with instructions to fix it. Do NOT output XML tags like <function=...>. Only use the provided JSON tool format.",
         "tools": ["read_artifact", "save_artifact", "delegate_to_agent"],
         "allowed_transitions": ["General_Synthesizer", "IT_Coder", "Hive_Queen"]
     },
     "Hive_Queen": {
-        "system_prompt": "You are the Hive Queen. You receive the final approved draft. Format it beautifully and save it as 'final_answer'. Then use the finish_task tool to end the swarm process.",
+        "system_prompt": "You are the Hive Queen. You receive the final approved draft. Format it beautifully and save it as 'final_answer'. Then use the finish_task tool to end the swarm process. Do NOT output XML tags like <function=...>. Only use the provided JSON tool format.",
         "tools": ["read_artifact", "save_artifact", "finish_task"],
         "allowed_transitions": []
     }
 }
-
 # ==============================================================================
 # 3. TOOL IMPLEMENTATIONS
 # ==============================================================================
