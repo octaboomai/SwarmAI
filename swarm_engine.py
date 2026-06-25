@@ -1,19 +1,70 @@
 import os
 import json
+import re
 from typing import List, Dict
-from duckduckgo_search import DDGS
-from groq import Groq
+from openai import OpenAI
 
-print("[*] Initializing Sovereign Swarm Enterprise Core (v12.0 - Final)...")
+try:
+    from ddgs import DDGS
+except ImportError:
+    from duckduckgo_search import DDGS
 
-if not os.environ.get("GROQ_API_KEY"):
-    raise RuntimeError("FATAL ERROR: GROQ_API_KEY environment variable is not set.")
-
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-MODEL = "llama-3.3-70b-versatile"
+print("[*] Initializing Apex Swarm OS™ (v22.1 - Stability & Render Fix)...")
 
 # ==============================================================================
-# 1. SHARED WORKSPACE
+# 1. DYNAMIC AI BRAIN ROUTER (NVIDIA Qwen 3.5 Elite Stack)
+# ==============================================================================
+# NOTE (fix): Groq decommissioned llama3-8b-8192 a long time ago, and on
+# 2026-06-17 it ALSO decommissioned llama-3.1-8b-instant and
+# llama-3.3-70b-versatile for free/developer-tier usage. That means every
+# single free-tier agent in the old config was calling a dead model ID and
+# would fail on every request. Swapped to Groq's own recommended
+# replacements (openai/gpt-oss-20b / openai/gpt-oss-120b), which are
+# current, tool-calling capable, and fast.
+AGENT_MODELS = {
+    "Master_Orchestrator": {
+        "free": "groq/openai/gpt-oss-20b",
+        "pro": "meta/llama-3.1-8b-instruct"
+    },
+    "Apex_Researcher": {
+        "free": "groq/openai/gpt-oss-120b",
+        "pro": "qwen/qwen3-next-80b-a3b-instruct"
+    },
+    "Apex_Strategist": {
+        "free": "groq/openai/gpt-oss-120b",
+        "pro": "meta/llama-3.1-70b-instruct"
+    },
+    "Apex_Coder": {
+        "free": "groq/openai/gpt-oss-120b",
+        "pro": "qwen/qwen3-next-80b-a3b-instruct"
+    }
+}
+
+def get_client_for_model(tier: str, agent_name: str):
+    """Returns (client, actual_model_id, is_groq)."""
+    model_name = AGENT_MODELS.get(agent_name, {}).get(tier, "groq/openai/gpt-oss-120b")
+
+    # fix: use startswith() on the explicit "groq/" marker prefix instead of
+    # a loose substring check, so routing can't be fooled by a future model
+    # id that happens to contain "groq" somewhere else in its name.
+    is_groq = model_name.startswith("groq/")
+
+    if is_groq:
+        client = OpenAI(
+            api_key=os.environ.get("GROQ_API_KEY"),
+            base_url="https://api.groq.com/openai/v1"
+        )
+        actual_model_name = model_name[len("groq/"):]
+        return client, actual_model_name, True
+    else:
+        client = OpenAI(
+            api_key=os.environ.get("NVIDIA_API_KEY"),
+            base_url="https://integrate.api.nvidia.com/v1"
+        )
+        return client, model_name, False
+
+# ==============================================================================
+# 2. SHARED WORKSPACE & TOKEN TRACKING
 # ==============================================================================
 class SwarmState:
     def __init__(self, query: str):
@@ -22,312 +73,298 @@ class SwarmState:
         self.artifacts = {}
         self.messages = []
         self.current_agent = None
+        self.tokens_used = 0  # Track total tokens consumed
 
-    def add_artifact(self, key: str, value: str):
-        self.artifacts[key] = value
-
-    def get_artifact(self, key: str) -> str:
-        return self.artifacts.get(key, "No data available.")
-
-    def to_dict(self):
-        return {
-            "plan": self.plan, 
-            "final_answer": self.artifacts.get("final_answer", "Error: No final answer generated."), 
-            "history": self.messages
-        }
+    def add_artifact(self, key: str, value: str): self.artifacts[key] = value
+    def get_artifact(self, key: str) -> str: return self.artifacts.get(key, "No data available.")
+    def to_dict(self): return {
+        "plan": self.plan,
+        "final_answer": self.artifacts.get("final_answer", "Error: No final answer generated."),
+        "history": self.messages,
+        "tokens_used": self.tokens_used
+    }
 
 # ==============================================================================
-# 2. AGENT DEFINITIONS (STRICT PROMPTS)
+# 3. AGENT DEFINITIONS
 # ==============================================================================
 AGENT_DEFS = {
-    "Orchestrator": {
-        "system_prompt": "You are the Master Orchestrator. Analyze the user's request and delegate it to the correct specialist. If code, delegate to IT_Coder. If research/facts/news, delegate to Research_Analyst. Otherwise, General_Synthesizer.",
-        "tools": ["delegate_to_agent"],
-        "allowed_transitions": ["Research_Analyst", "IT_Coder", "General_Synthesizer"]
-    },
-    "Research_Analyst": {
+    "Master_Orchestrator": {
         "system_prompt": (
-            "You are a Senior Research Analyst. Your job is to gather raw evidence and delegate to General_Synthesizer.\n"
+            "You are the Master Orchestrator of the Apex Swarm OS. Analyze the user's request and route it instantly.\n"
+            "ROUTING RULES:\n"
+            "- If they want CODE, a WEB APP, a UI, or a DASHBOARD: Delegate to Apex_Coder.\n"
+            "- If they want RESEARCH, WEB DATA, or MARKET ANALYSIS: Delegate to Apex_Researcher.\n"
+            "- If they want WRITING, STRATEGY, or EMAILS: Delegate to Apex_Strategist.\n"
+            "Be fast. Do not ask follow-up questions. Just route."
+        ),
+        "tools": ["delegate_to_agent"],
+        "allowed_transitions": ["Apex_Coder", "Apex_Researcher", "Apex_Strategist"]
+    },
+    "Apex_Researcher": {
+        "system_prompt": (
+            "You are an Apex Researcher. Gather raw intelligence at lightning speed.\n"
             "WORKFLOW:\n"
-            "1. Call `tool_web_search`.\n"
-            "2. If search returns specific results, extract the specific facts, names, and events. DO NOT summarize. Extract raw data.\n"
-            "3. If search FAILS or returns 'No results', you MUST save an artifact saying: 'LIVE SEARCH FAILED. The Synthesizer must inform the user that live web search is currently unavailable and provide a general historical overview instead.'\n"
-            "4. Save your findings using `save_artifact` with key 'research'.\n"
-            "5. Delegate to 'General_Synthesizer'.\n"
-            "NEVER delegate to yourself. NEVER output generic fluff like 'advances in AI and quantum computing'. Be specific or report the failure."
+            "1. Call `tool_web_search` if you need live data.\n"
+            "2. Extract specific facts, numbers, and names. No fluff.\n"
+            "3. Save findings using `save_artifact` with key 'research_data'.\n"
+            "4. Delegate to Apex_Strategist to format the final answer.\n"
+            "NEVER delegate to yourself."
         ),
         "tools": ["tool_web_search", "save_artifact", "delegate_to_agent"],
-        "allowed_transitions": ["General_Synthesizer"]
+        "allowed_transitions": ["Apex_Strategist"]
     },
-    "IT_Coder": {
-        "system_prompt": "You are a Senior Software Engineer. Write clean, working code. Save as 'draft' and delegate to QA_Auditor. Do NOT delegate to yourself.",
-        "tools": ["save_artifact", "delegate_to_agent"],
-        "allowed_transitions": ["QA_Auditor"]
-    },
-    "General_Synthesizer": {
+    "Apex_Strategist": {
         "system_prompt": (
-            "You are a Synthesizer. Read 'research' from workspace using `read_artifact`.\n"
-            "RULES:\n"
-            "- If research contains specific facts, write a detailed answer using EXACTLY this format:\n"
-            "🎯 BOTTOM LINE:\n(2-sentence direct answer)\n\n🧠 CONTEXT:\n(3-4 sentences)\n\n📊 DATA POINTS:\n- (fact 1)\n- (fact 2)\n- (fact 3)\n\n"
-            "- If research says 'LIVE SEARCH FAILED', you MUST tell the user: 'I apologize, but my live web search is currently unavailable due to API rate limits. I cannot provide today's live news.' Then provide a very brief, specific historical fact if possible, but DO NOT pretend to have live news.\n"
-            "- NEVER be generic. NEVER use fluff.\n"
-            "Save draft as 'draft' and delegate to QA_Auditor."
+            "You are an Apex Strategist. You write high-value, formatted answers.\n"
+            "WORKFLOW:\n"
+            "1. Read 'research_data' using `read_artifact` if available.\n"
+            "2. Write the final answer. Use Markdown for structure.\n"
+            "3. Save as 'final_answer' using `save_artifact`.\n"
+            "4. Call `finish_task`."
         ),
-        "tools": ["read_artifact", "save_artifact", "delegate_to_agent"],
-        "allowed_transitions": ["QA_Auditor"]
-    },
-    "QA_Auditor": {
-        "system_prompt": (
-            "You are the QA Auditor. Read 'draft' from workspace.\n"
-            "CHECKS:\n"
-            "1. Is it generic fluff (e.g., 'advances in AI')? If yes, REJECT and delegate back to General_Synthesizer with note: 'Too generic, be specific or state live data is unavailable'.\n"
-            "2. Does it follow the required format? If no, REJECT.\n"
-            "If perfect, delegate to Hive_Queen. DO NOT delegate to yourself."
-        ),
-        "tools": ["read_artifact", "save_artifact", "delegate_to_agent"],
-        "allowed_transitions": ["General_Synthesizer", "IT_Coder", "Hive_Queen"]
-    },
-    "Hive_Queen": {
-        "system_prompt": "You are the Hive Queen. Read 'draft' using `read_artifact`. Polish it slightly if needed, save as 'final_answer', and call `finish_task`. DO NOT rewrite the core content.",
         "tools": ["read_artifact", "save_artifact", "finish_task"],
+        "allowed_transitions": []
+    },
+    "Apex_Coder": {
+        "system_prompt": (
+            "You are an Apex Coder and Elite Debugger. You use deep reasoning to build flawless applications and fix complex bugs.\n"
+            "WORKFLOW FOR BUILDING APPS:\n"
+            "1. Think step-by-step about the architecture before writing code.\n"
+            "2. Write a SINGLE FILE HTML app using Tailwind CSS (via CDN) and Vanilla JS.\n"
+            "3. It must be fully self-contained and runnable in an iframe.\n"
+            "4. Wrap the HTML code in ```html ... ``` markdown blocks.\n\n"
+            "WORKFLOW FOR DEBUGGING:\n"
+            "1. Analyze the provided code or error message carefully.\n"
+            "2. Identify the root cause of the bug using step-by-step logic.\n"
+            "3. Provide the fully corrected code, highlighting what was changed.\n"
+            "4. Wrap corrected code in the appropriate markdown blocks (e.g., ```python, ```javascript).\n\n"
+            "Save the output as 'final_answer' using `save_artifact`.\n"
+            "Call `finish_task`."
+        ),
+        "tools": ["save_artifact", "finish_task"],
         "allowed_transitions": []
     }
 }
 
 # ==============================================================================
-# 3. TOOL IMPLEMENTATIONS (HARDENED)
+# 4. TOOL IMPLEMENTATIONS
 # ==============================================================================
 def tool_web_search(query: str) -> str:
-    # Strip conversational filler to improve DDGS success rate
-    clean_query = query.replace("top 3", "").replace("today", "").replace("latest", "").strip()
-    if not clean_query:
-        clean_query = "technology news"
-        
+    clean_query = query.replace("top 3", "").replace("latest", "").strip()
+    if not clean_query: clean_query = "market analysis"
     print(f"    [TOOL_EXEC] Searching: {clean_query!r}")
     try:
         with DDGS(timeout=10) as ddgs:
-            # Added region and safesearch to improve result quality
             results = list(ddgs.text(clean_query, region="wt-wt", safesearch="off", max_results=5))
-            
-        if not results:
-            return "LIVE SEARCH FAILED: No results found."
-            
-        formatted = "\n".join(
-            f"[{i+1}] {r.get('title', '')}: {r.get('body', '')}"
-            for i, r in enumerate(results)
-        )
-        return formatted
+        if not results: return "LIVE SEARCH FAILED: No results found."
+        return "\n".join(f"[{i+1}] {r.get('title', '')}: {r.get('body', '')}" for i, r in enumerate(results))
     except Exception as e:
         return f"LIVE SEARCH FAILED: Search engine error ({e})."
 
 TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "delegate_to_agent",
-            "description": "Hand off the current task to another agent.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "agent_name": {"type": "string", "enum": list(AGENT_DEFS.keys()), "description": "The agent to hand control to."},
-                    "message": {"type": "string", "description": "Tell the next agent what they need to do."}
-                },
-                "required": ["agent_name", "message"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "tool_web_search",
-            "description": "Search the web for real-time data, facts, or news.",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "Search keywords"}},
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "save_artifact",
-            "description": "Save your work (research, draft, code) to the shared workspace so other agents can read it.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "key": {"type": "string", "enum": ["research", "draft", "code", "final_answer"], "description": "The name of the artifact."},
-                    "content": {"type": "string", "description": "The full text of the artifact."}
-                },
-                "required": ["key", "content"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_artifact",
-            "description": "Read an artifact from the shared workspace (e.g., research data or a draft).",
-            "parameters": {
-                "type": "object",
-                "properties": {"key": {"type": "string", "enum": ["research", "draft", "code"], "description": "The name of the artifact to read."}},
-                "required": ["key"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "finish_task",
-            "description": "End the swarm process because the task is fully complete.",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    }
+    {"type": "function", "function": {"name": "delegate_to_agent", "description": "Hand off the current task to another agent.", "parameters": {"type": "object", "properties": {"agent_name": {"type": "string", "enum": list(AGENT_DEFS.keys())}, "message": {"type": "string"}}, "required": ["agent_name", "message"]}}},
+    {"type": "function", "function": {"name": "tool_web_search", "description": "Search the web for market data, competitor info, or news.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "save_artifact", "description": "Save work to the shared workspace.", "parameters": {"type": "object", "properties": {"key": {"type": "string", "enum": ["research_data", "final_answer"]}, "content": {"type": "string"}}, "required": ["key", "content"]}}},
+    {"type": "function", "function": {"name": "read_artifact", "description": "Read an artifact from the workspace.", "parameters": {"type": "object", "properties": {"key": {"type": "string", "enum": ["research_data"]}}, "required": ["key"]}}},
+    {"type": "function", "function": {"name": "finish_task", "description": "End the swarm process.", "parameters": {"type": "object", "properties": {}}}}
 ]
 
+def get_tool_schemas_for_agent(agent_name: str) -> list:
+    allowed = set(AGENT_DEFS[agent_name]["tools"])
+    return [s for s in TOOL_SCHEMAS if s["function"]["name"] in allowed]
+
+def dispatch_tool_call(state: SwarmState, agent_name: str, agent_def: dict, func_name: str, func_args: dict):
+    """
+    fix: every argument is now read with .get() and validated instead of
+    raw dict indexing (func_args["key"]). Previously, a model that emitted
+    a tool call with a missing/misnamed argument (which free-tier models do
+    occasionally, especially mid self-heal) would raise an uncaught
+    KeyError and kill the whole agent turn. Now it returns a descriptive
+    error string back to the model so the loop can recover gracefully.
+    """
+    if func_name not in agent_def["tools"]:
+        return f"ERROR: {agent_name} is not permitted to use '{func_name}'.", False
+
+    if func_name == "delegate_to_agent":
+        next_agent = func_args.get("agent_name")
+        if not next_agent:
+            return "ERROR: delegate_to_agent call is missing the required 'agent_name' argument.", False
+        if next_agent == agent_name:
+            return f"CRITICAL ERROR: You cannot delegate to yourself! You are {agent_name}.", False
+        if next_agent not in agent_def["allowed_transitions"]:
+            return f"ERROR: You cannot delegate to {next_agent}.", False
+        state.current_agent = next_agent
+        handoff_note = func_args.get("message", "")
+        return f"Control handed over to {next_agent}. Handoff note from {agent_name}: {handoff_note}", False
+
+    elif func_name == "save_artifact":
+        key = func_args.get("key")
+        content = func_args.get("content")
+        if not key or content is None:
+            return "ERROR: save_artifact requires both a 'key' and 'content' argument.", False
+        state.add_artifact(key, content)
+        return f"Artifact '{key}' saved successfully.", False
+
+    elif func_name == "read_artifact":
+        key = func_args.get("key")
+        if not key:
+            return "ERROR: read_artifact requires a 'key' argument.", False
+        return state.get_artifact(key), False
+
+    elif func_name == "tool_web_search":
+        query = func_args.get("query")
+        if not query:
+            return "ERROR: tool_web_search requires a 'query' argument.", False
+        return tool_web_search(query), False
+
+    elif func_name == "finish_task":
+        if "final_answer" not in state.artifacts: state.add_artifact("final_answer", "Task finished, but no final answer was saved.")
+        return "Task finished.", True
+
+    return f"Error: Tool {func_name} not found.", False
+
 # ==============================================================================
-# 4. THE AGENTIC EXECUTION LOOP
+# 4b. SELF-HEAL HELPER
 # ==============================================================================
-def execute_agent_loop(state: SwarmState, max_steps: int = 10) -> dict:
+def extract_self_healed_call(error_str: str):
+    """
+    fix (this is the bug behind the screenshot): the old code used the regex
+    r'<function=(\\w+)>(\\{.*?\\})</function>' to pull the JSON arguments out
+    of a malformed tool call. `.*?` is non-greedy, so it stops at the FIRST
+    closing brace it finds. Any time the tool call's content contains its
+    own braces -- which is guaranteed for generated HTML/CSS/JS, e.g.
+    `body { margin: 0; }` -- the regex truncated the JSON at that inner
+    brace instead of the real end of the object. That produced invalid JSON
+    (or, when it happened to still parse, badly truncated HTML), which is
+    exactly the raw, unrendered "<!DOCTYPE html>..." text from the
+    screenshot.
+
+    Fix: find where the JSON object starts, then let Python's own JSON
+    decoder (`raw_decode`) walk forward and find the real matching closing
+    brace, since it understands string escaping and nesting correctly.
+    """
+    start_match = re.search(r'<function=(\w+)>\s*(\{)', error_str)
+    if not start_match:
+        return None, None
+
+    func_name = start_match.group(1)
+    json_start = start_match.start(2)
+
+    decoder = json.JSONDecoder()
+    try:
+        func_args, _end_idx = decoder.raw_decode(error_str, json_start)
+    except json.JSONDecodeError:
+        return func_name, None
+
+    return func_name, func_args
+
+# ==============================================================================
+# 5. THE AGENTIC EXECUTION LOOP
+# ==============================================================================
+def execute_agent_loop(state: SwarmState, tier: str = "free", max_output_tokens: int = 4096, max_steps: int = 15) -> dict:
     step = 0
-    
     while step < max_steps:
         step += 1
         agent_name = state.current_agent
         agent_def = AGENT_DEFS[agent_name]
-        
-        print(f"\n[STEP {step}] Executing Agent: {agent_name}")
-        state.plan.append(agent_name)
 
+        client, model_name, is_groq = get_client_for_model(tier, agent_name)
+        print(f"\n[STEP {step}] Agent: {agent_name} | Model: {model_name} | Tier: {tier}")
+
+        state.plan.append(agent_name)
         api_messages = [{"role": "system", "content": agent_def["system_prompt"]}] + state.messages
+        agent_tools = get_tool_schemas_for_agent(agent_name)
+
+        # fix: Groq has deprecated `max_tokens` in favor of `max_completion_tokens`
+        # for its current reasoning-capable lineup (openai/gpt-oss-*, qwen3,
+        # deepseek-r1 variants) -- every current Groq doc example for these
+        # models uses max_completion_tokens. NVIDIA NIM's OpenAI-compatible
+        # endpoint still expects max_tokens. Pick the right kwarg per-provider
+        # instead of hardcoding one that silently breaks the other.
+        token_kwarg = {"max_completion_tokens": max_output_tokens} if is_groq else {"max_tokens": max_output_tokens}
 
         try:
             response = client.chat.completions.create(
-                model=MODEL,
+                model=model_name,
                 messages=api_messages,
-                tools=TOOL_SCHEMAS,
+                tools=agent_tools,
                 tool_choice="auto",
-                max_tokens=2000,
-                temperature=0.3
+                temperature=0.3,
+                **token_kwarg
             )
+
+            if hasattr(response, 'usage') and response.usage:
+                state.tokens_used += response.usage.total_tokens
+
         except Exception as e:
             error_str = str(e)
-            # SELF-HEALING: If Llama-3 tries to output XML function calls instead of JSON, catch it!
             if "failed_generation" in error_str and "<function=" in error_str:
-                print(f"    [SELF-HEAL] Caught XML function call. Parsing manually...")
-                import re
-                # Extract the function name and arguments from the XML string
-                match = re.search(r'<function=(\w+)=({.*?})</function>', error_str)
-                if match:
-                    func_name = match.group(1)
-                    func_args = json.loads(match.group(2))
-                    
-                    print(f"    [SELF-HEAL] Manually executing: {func_name}({func_args})")
-                    
-                    # Manually execute the search
-                    observation = ""
-                    if func_name == "tool_web_search":
-                        observation = tool_web_search(**func_args)
-                    else:
-                        observation = f"Error: Cannot auto-heal tool {func_name}."
-                    
-                    # Inject the results back into the LLM's memory as if it succeeded
-                    state.messages.append({
-                        "role": "assistant", 
-                        "content": None, 
-                        "tool_calls": [{
-                            "id": "healed_call_1", 
-                            "type": "function", 
-                            "function": {"name": func_name, "arguments": json.dumps(func_args)}
-                        }]
-                    })
-                    state.messages.append({
-                        "role": "tool", 
-                        "name": func_name, 
-                        "content": str(observation), 
-                        "tool_call_id": "healed_call_1"
-                    })
-                    
-                    # Continue the loop so the LLM processes the search results
-                    continue 
+                print("    [SELF-HEAL] Caught malformed function call. Parsing manually...")
+                func_name, func_args = extract_self_healed_call(error_str)
+
+                if func_name and func_args is not None:
+                    print(f"    [SELF-HEAL] Manually executing: {func_name}({str(func_args)[:200]})")
+                    try:
+                        observation, finished = dispatch_tool_call(state, agent_name, agent_def, func_name, func_args)
+                    except Exception as dispatch_err:
+                        observation, finished = f"ERROR while executing self-healed call: {dispatch_err}", False
+
+                    healed_id = f"healed_call_{step}"
+                    state.messages.append({"role": "assistant", "content": None, "tool_calls": [{"id": healed_id, "type": "function", "function": {"name": func_name, "arguments": json.dumps(func_args)}}]})
+                    state.messages.append({"role": "tool", "name": func_name, "content": str(observation), "tool_call_id": healed_id})
+                    if finished: return state.to_dict()
+                    continue
                 else:
-                    print(f"[ERROR] Unparsable API Error: {e}")
-                    state.add_artifact("final_answer", f"⚠️ Swarm API Error: {e}")
+                    state.add_artifact("final_answer", f"⚠️ Swarm API Error (could not self-heal malformed call): {e}")
                     return state.to_dict()
-            else:
-                print(f"[ERROR] Groq API failed: {e}")
-                state.add_artifact("final_answer", f"⚠️ Swarm API Error: {e}")
-                return state.to_dict()
+            elif "429" in error_str or "rate_limit" in error_str.lower():
+                state.add_artifact("final_answer", "⚠️ **Swarm is at Capacity:** High traffic. Please wait 60 seconds or upgrade to Pro for priority."); return state.to_dict()
+            state.add_artifact("final_answer", f"⚠️ Swarm API Error: {e}"); return state.to_dict()
 
         choice = response.choices[0]
-        
         if choice.finish_reason == "tool_calls":
             state.messages.append(choice.message)
-            
             for tool_call in choice.message.tool_calls:
+                try: func_args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    state.messages.append({"role": "tool", "name": tool_call.function.name, "content": f"ERROR: Could not parse arguments as JSON: {tool_call.function.arguments!r}", "tool_call_id": tool_call.id}); continue
                 func_name = tool_call.function.name
-                func_args = json.loads(tool_call.function.arguments)
-                
-                print(f"    [ACTION] {func_name}({func_args})")
-
-                if func_name == "delegate_to_agent":
-                    next_agent = func_args["agent_name"]
-                    
-                    # ANTI-LOOP: Prevent self-delegation
-                    if next_agent == agent_name:
-                        observation = f"CRITICAL ERROR: You cannot delegate to yourself! You are {agent_name}. You MUST delegate to: {agent_def['allowed_transitions']}."
-                    elif next_agent not in agent_def["allowed_transitions"]:
-                        observation = f"ERROR: You cannot delegate to {next_agent}. You MUST delegate to: {agent_def['allowed_transitions']}."
-                    else:
-                        state.current_agent = next_agent
-                        observation = f"Control handed over to {next_agent}."
-                        state.messages.append({"role": "user", "content": f"Message from {agent_name}: {func_args['message']}"})
-
-                elif func_name == "save_artifact":
-                    state.add_artifact(func_args["key"], func_args["content"])
-                    observation = f"Artifact '{func_args['key']}' saved successfully."
-
-                elif func_name == "read_artifact":
-                    observation = state.get_artifact(func_args["key"])
-
-                elif func_name == "finish_task":
-                    if "final_answer" not in state.artifacts:
-                        state.add_artifact("final_answer", "Task finished, but no final answer was saved by the Queen.")
-                    return state.to_dict()
-
-                elif func_name == "tool_web_search":
-                    observation = tool_web_search(**func_args)
-
-                else:
-                    observation = f"Error: Tool {func_name} not found."
-
-                state.messages.append({
-                    "role": "tool",
-                    "name": func_name,
-                    "content": str(observation),
-                    "tool_call_id": tool_call.id
-                })
-        
+                print(f"    [ACTION] {func_name}({str(func_args)[:200]})")
+                try:
+                    observation, finished = dispatch_tool_call(state, agent_name, agent_def, func_name, func_args)
+                except Exception as dispatch_err:
+                    observation, finished = f"ERROR while executing tool: {dispatch_err}", False
+                state.messages.append({"role": "tool", "name": func_name, "content": str(observation), "tool_call_id": tool_call.id})
+                if finished: return state.to_dict()
         elif choice.finish_reason == "stop":
-            state.messages.append({"role": "assistant", "content": choice.message.content})
-            state.messages.append({"role": "user", "content": "You must use a tool to proceed. Either delegate, save your work, or finish the task."})
-        
-        else:
-            break
+            content = choice.message.content or ""
+            # fix: Apex_Strategist and Apex_Coder are terminal agents (empty
+            # allowed_transitions) -- they have nowhere left to delegate to.
+            # The old code always nagged "you must use a tool" even when a
+            # terminal agent had already produced a perfectly good final
+            # answer as plain content (which free-tier models do regularly,
+            # since they don't always force a tool call). That nag loop is
+            # exactly what produced the 20k-token cost in the screenshot:
+            # the same large HTML response got repeated back into context
+            # on every retry. Now we just accept the content directly.
+            is_terminal_agent = len(agent_def["allowed_transitions"]) == 0
+            if is_terminal_agent and content.strip():
+                print(f"    [AUTO-ACCEPT] {agent_name} answered directly without a tool call; accepting it as the final answer.")
+                state.add_artifact("final_answer", content)
+                return state.to_dict()
+            state.messages.append({"role": "assistant", "content": content})
+            state.messages.append({"role": "user", "content": "You must use a tool to proceed. Delegate, save, or finish."})
+        else: state.add_artifact("final_answer", f"⚠️ Swarm stopped unexpectedly (finish_reason='{choice.finish_reason}')."); break
 
-    state.add_artifact("final_answer", "⚠️ Swarm exceeded maximum steps. Task aborted to prevent infinite loops.")
+    if "final_answer" not in state.artifacts: state.add_artifact("final_answer", "⚠️ Swarm exceeded maximum steps without finishing.")
     return state.to_dict()
 
 # ==============================================================================
-# 5. ENTRY POINT
+# 6. ENTRY POINT
 # ==============================================================================
-def run_swarm(user_prompt: str) -> dict:
-    print(f"\n[SWARM v12.0] Query: {user_prompt[:60]}...")
-    
+def run_swarm(user_prompt: str, tier: str = "free", max_output_tokens: int = 4096) -> dict:
+    print(f"\n[SWARM v22.1] Query: {user_prompt[:60]}... (Tier: {tier} | Max Output: {max_output_tokens})")
     state = SwarmState(query=user_prompt)
-    state.current_agent = "Orchestrator"
-    
-    state.messages.append({"role": "user", "content": f"User Request: {user_prompt}\n\nPlease delegate this to the appropriate agent."})
-
-    return execute_agent_loop(state)
+    state.current_agent = "Master_Orchestrator"
+    state.messages.append({"role": "user", "content": f"Client Request: {user_prompt}\n\nPlease delegate this to the appropriate specialist."})
+    return execute_agent_loop(state, tier=tier, max_output_tokens=max_output_tokens)
